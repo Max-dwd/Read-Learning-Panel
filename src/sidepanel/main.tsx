@@ -17,7 +17,14 @@ import {
   updateHistoryScrollPos,
   type HistoryEntry
 } from "../shared/history";
-import { analyzeArticleProgressively, answerPdfQuestion, answerSectionQuestion, generatePdfGuide } from "../shared/model";
+import {
+  analyzeArticleProgressively,
+  analyzePdfProgressively,
+  answerPdfQuestion,
+  answerSectionQuestion,
+  generatePdfGuide,
+  type AnalysisProgressEvent
+} from "../shared/model";
 import {
   getPdfSourceUrl,
   getPdfTargetPageFromUrl,
@@ -83,6 +90,9 @@ type PdfAnswer = {
   targetPage: number | null;
   createdAt: number;
 };
+
+const PDF_PAGE_SECTION_PREFIX = "pdf-page-";
+
 type PageCacheEntry = {
   article: ExtractedArticle;
   analysis: AnalysisResult | null;
@@ -480,6 +490,8 @@ function App() {
     }
 
     const targetPage = Math.min(getPdfTargetPageFromUrl(tabUrl), loadedPdf.pageCount);
+    const pdfArticle = buildPdfArticle(loadedPdf);
+    const pageKey = getPageKey(pdfArticle.url);
     pdfDocumentRef.current = loadedPdf;
     setPdfDocument(loadedPdf);
     setPdfPageRange("all");
@@ -493,7 +505,31 @@ function App() {
     setPdfGuideState("idle");
     setPdfGuideError("");
     setPdfGuideRawError("");
-    setLoadState("ready");
+
+    const persistedSession = !force ? await loadAnalysisSession(pageKey) : null;
+    if (persistedSession) {
+      applyAnalysisSession(persistedSession);
+    } else {
+      const cached = !force ? cacheRef.current.get(pageKey) : null;
+      if (cached) {
+        applyPageCache(cached, pageKey);
+      } else {
+        const persisted = !force ? await findHistoryEntry(pdfArticle.url) : null;
+        if (persisted) {
+          cacheRef.current.set(pageKey, {
+            article: persisted.article,
+            analysis: persisted.analysis,
+            followUps: persisted.followUps,
+            scrollPos: persisted.scrollPos
+          });
+          applyPage(persisted.article, persisted.analysis, pageKey);
+        } else {
+          cacheRef.current.set(pageKey, { article: pdfArticle, analysis: null, followUps: {} });
+          applyPage(pdfArticle, null, pageKey);
+        }
+      }
+    }
+
     void renderPdfPreview(loadedPdf);
   }
 
@@ -620,7 +656,7 @@ function App() {
         });
       }
 
-      result = await analyzeArticleProgressively(articleForAnalysis, currentSettings, (event) => {
+      const progressHandler = (event: AnalysisProgressEvent) => {
         if (analysisVersion !== analysisVersionRef.current) {
           return;
         }
@@ -675,7 +711,28 @@ function App() {
           setAnalysis(result);
           setSectionAnalyzeState(latestSectionState);
         }
-      });
+      };
+
+      const pdfImages =
+        documentMode === "pdf" && pdfDocumentRef.current
+          ? await getPdfImagesForPages(
+              pdfDocumentRef.current,
+              articleForAnalysis.sections.map((section) => getPdfPageFromSectionId(section.id)).filter(isKnownPage)
+            )
+          : [];
+      if (pdfImages.length > 0) {
+        setPdfPageImages((images) => mergePdfPageImages(images, pdfImages));
+      }
+
+      result =
+        documentMode === "pdf" && pdfDocumentRef.current
+          ? await analyzePdfProgressively({
+              article: articleForAnalysis,
+              pageImages: pdfImages,
+              settings: currentSettings,
+              onProgress: progressHandler
+            })
+          : await analyzeArticleProgressively(articleForAnalysis, currentSettings, progressHandler);
       if (analysisVersion !== analysisVersionRef.current) {
         return;
       }
@@ -1031,7 +1088,14 @@ function App() {
     }
   }
 
-  function restoreHistoryEntry(entry: HistoryEntry) {
+  async function restoreHistoryEntry(entry: HistoryEntry) {
+    if (entry.article.siteName === "PDF") {
+      setViewMode("reader");
+      const tab = await getActiveTab();
+      await chrome.tabs.update(tab.id, { url: getCustomViewerUrl(entry.article.url) });
+      return;
+    }
+
     const pageKey = getPageKey(entry.article.url);
     cacheRef.current.set(pageKey, {
       article: entry.article,
@@ -1123,7 +1187,7 @@ function App() {
           history={history}
           onClear={() => void removeAllHistory()}
           onDelete={(entry) => void removeHistoryEntry(entry)}
-          onRestore={restoreHistoryEntry}
+          onRestore={(entry) => void restoreHistoryEntry(entry)}
         />
       )}
 
@@ -1166,6 +1230,12 @@ function App() {
           guideRawError={pdfGuideRawError}
           followedPdfPage={followedPdfPage}
           pageImages={pdfPageImages}
+          analysis={analysis}
+          analysisState={analysisState}
+          analysisError={analysisError}
+          rawAnalysisError={rawError}
+          sectionAnalyzeState={sectionAnalyzeState}
+          sectionAnalyzeErrors={sectionAnalyzeErrors}
           previewState={pdfPreviewState}
           previewError={pdfPreviewError}
           state={pdfQuestionState}
@@ -1175,7 +1245,7 @@ function App() {
           onPageRangeChange={setPdfPageRange}
           onTargetPageChange={setPdfTargetPage}
           onQuestionChange={setPdfQuestion}
-          onGenerateGuide={() => void runPdfGuide()}
+          onGenerateGuide={() => void runAnalysis()}
           onFocusPage={(page) => {
             setPdfTargetPage(String(page));
             setPdfPageRange("all");
@@ -1381,6 +1451,12 @@ function PdfReader({
   guideRawError,
   followedPdfPage,
   pageImages,
+  analysis,
+  analysisState,
+  analysisError,
+  rawAnalysisError,
+  sectionAnalyzeState,
+  sectionAnalyzeErrors,
   previewState,
   previewError,
   state,
@@ -1406,6 +1482,12 @@ function PdfReader({
   guideRawError: string;
   followedPdfPage: number | null;
   pageImages: PdfPageImage[];
+  analysis: AnalysisResult | null;
+  analysisState: AnalyzeState;
+  analysisError: string;
+  rawAnalysisError: string;
+  sectionAnalyzeState: Record<string, SectionAnalyzeState>;
+  sectionAnalyzeErrors: Record<string, string>;
   previewState: PdfPreviewState;
   previewError: string;
   state: PdfQuestionState;
@@ -1421,9 +1503,21 @@ function PdfReader({
   onOpenSettings: () => void;
 }) {
   const canAsk = !needsSettings && state !== "running" && normalizeQuestion(question);
-  const canGenerateGuide = !needsSettings && guideState !== "running";
+  const canGenerateGuide = !needsSettings && analysisState !== "running";
   const focusedPage = Number(targetPage);
   const guideByPage = useMemo(() => new Map((guide?.pages ?? []).map((pageGuide) => [pageGuide.page, pageGuide])), [guide]);
+  const analysisByPage = useMemo(() => {
+    const map = new Map<number, AnalysisResult["sections"][number]>();
+    analysis?.sections.forEach((section) => {
+      const page = getPdfPageFromSectionId(section.id);
+      if (page) {
+        map.set(page, section);
+      }
+    });
+    return map;
+  }, [analysis]);
+  const completedPages = pageImages.filter((image) => sectionAnalyzeState[`${PDF_PAGE_SECTION_PREFIX}${image.page}`] === "done").length;
+  const runningPage = pageImages.find((image) => sectionAnalyzeState[`${PDF_PAGE_SECTION_PREFIX}${image.page}`] === "running")?.page;
   return (
     <>
       <section className="page-meta">
@@ -1448,7 +1542,7 @@ function PdfReader({
 
       <section className="pdf-panel">
         <button className="pdf-guide-button" type="button" disabled={!canGenerateGuide} onClick={onGenerateGuide}>
-          {guideState === "running" ? "Generating page guides..." : "Generate page guides"}
+          {analysisState === "running" ? "Analyzing PDF..." : analysis ? "Re-analyze PDF" : "Analyze PDF"}
         </button>
 
         <div className="pdf-controls">
@@ -1487,12 +1581,35 @@ function PdfReader({
         </form>
       </section>
 
-      {guideState === "running" && <Status text="Generating summary, explanation, and goal for every PDF page..." />}
+      {analysisState === "running" && (
+        <Status
+          text={
+            runningPage
+              ? `Analyzing page ${runningPage} of ${pdfDocument.pageCount}. ${completedPages} done.`
+              : "Preparing PDF overview..."
+          }
+        />
+      )}
+      {analysisState === "error" && (
+        <section className="error-box">
+          <strong>PDF analysis failed</strong>
+          <p>{analysisError}</p>
+          {rawAnalysisError && <pre>{rawAnalysisError}</pre>}
+        </section>
+      )}
       {guideState === "error" && (
         <section className="error-box">
           <strong>PDF page guide failed</strong>
           <p>{guideError}</p>
           {guideRawError && <pre>{guideRawError}</pre>}
+        </section>
+      )}
+
+      {analysis?.overall.summary && analysis.overall.why_read && (
+        <section className="overall">
+          <h2>Overall</h2>
+          <InfoBlock title="Summary" body={analysis.overall.summary} />
+          <InfoBlock title="Why read this" body={analysis.overall.why_read} />
         </section>
       )}
 
@@ -1522,6 +1639,9 @@ function PdfReader({
         <div className="pdf-page-list">
           {pageImages.map((image) => {
             const pageGuide = guideByPage.get(image.page);
+            const pageAnalysis = analysisByPage.get(image.page);
+            const sectionId = `${PDF_PAGE_SECTION_PREFIX}${image.page}`;
+            const pageStatus = sectionAnalyzeState[sectionId];
             return (
               <article
                 className={`pdf-page-card${image.page === focusedPage ? " active" : ""}${image.page === followedPdfPage ? " followed" : ""}`}
@@ -1532,8 +1652,17 @@ function PdfReader({
                 <div className="pdf-page-header">
                   <span>Page {image.page}</span>
                   {image.page === focusedPage && <strong>Focus</strong>}
+                  {pageStatus && pageStatus !== "done" && (
+                    <span className={`section-status ${pageStatus}`}>{formatSectionAnalyzeState(pageStatus)}</span>
+                  )}
                 </div>
-                {pageGuide ? (
+                {pageAnalysis ? (
+                  <div className="pdf-page-guide">
+                    <InfoBlock title="Summary" body={pageAnalysis.summary} />
+                    <InfoBlock title="What this means" body={pageAnalysis.interpretation} />
+                    <InfoBlock title="Role in PDF" body={pageAnalysis.role_in_article} />
+                  </div>
+                ) : pageGuide ? (
                   <div className="pdf-page-guide">
                     <InfoBlock title="Summary" body={pageGuide.summary} />
                     <InfoBlock title="Explanation" body={pageGuide.explanation} />
@@ -1543,6 +1672,15 @@ function PdfReader({
                   <div className="pdf-page-image-button">
                     <img src={image.dataUrl} alt={`PDF page ${image.page}`} loading="lazy" />
                   </div>
+                )}
+                {!pageAnalysis && pageStatus && pageStatus !== "done" && (
+                  <p className={`section-progress ${pageStatus}`}>
+                    {pageStatus === "error"
+                      ? sectionAnalyzeErrors[sectionId] || "This page failed to analyze."
+                      : pageStatus === "running"
+                        ? "Analyzing this page now..."
+                        : "Waiting for earlier pages..."}
+                  </p>
                 )}
               </article>
             );
@@ -1880,6 +2018,46 @@ function scrollPanelToSection(sectionId: string) {
 function scrollPanelToPdfPage(page: number) {
   const target = document.querySelector<HTMLElement>(`[data-learn-panel-pdf-page="${page}"]`);
   target?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function buildPdfArticle(pdfDocument: LoadedPdfDocument): ExtractedArticle {
+  const sections = Array.from({ length: pdfDocument.pageCount }, (_, index) => {
+    const page = index + 1;
+    return {
+      id: `${PDF_PAGE_SECTION_PREFIX}${page}`,
+      title: `Page ${page}`,
+      level: 2 as const,
+      text: `PDF page ${page}. The page screenshot is attached to the PDF vision model request.`
+    };
+  });
+
+  return {
+    title: pdfDocument.title,
+    url: pdfDocument.sourceUrl,
+    siteName: "PDF",
+    language: "unknown",
+    excerpt: `${pdfDocument.pageCount} page PDF document`,
+    text: sections.map((section) => section.text).join("\n\n"),
+    sections
+  };
+}
+
+function getPdfPageFromSectionId(sectionId: string): number | null {
+  if (!sectionId.startsWith(PDF_PAGE_SECTION_PREFIX)) {
+    return null;
+  }
+  const page = Number(sectionId.slice(PDF_PAGE_SECTION_PREFIX.length));
+  return Number.isInteger(page) && page > 0 ? page : null;
+}
+
+function isKnownPage(page: number | null): page is number {
+  return typeof page === "number";
+}
+
+function mergePdfPageImages(existing: PdfPageImage[], next: PdfPageImage[]): PdfPageImage[] {
+  const byPage = new Map(existing.map((image) => [image.page, image]));
+  next.forEach((image) => byPage.set(image.page, image));
+  return [...byPage.values()].sort((a, b) => a.page - b.page);
 }
 
 async function getActiveTab(): Promise<chrome.tabs.Tab & { id: number }> {

@@ -324,6 +324,25 @@ h3 {
   font-size: 12px;
 }
 
+.pdf-page-header .section-status {
+  background: #eef2f7;
+  border-radius: 5px;
+  color: #526173;
+  font-size: 11px;
+  line-height: 20px;
+  padding: 0 6px;
+}
+
+.pdf-page-header .section-status.running {
+  background: #fff3cf;
+  color: #815a00;
+}
+
+.pdf-page-header .section-status.error {
+  background: #ffe5e5;
+  color: #9f1f1f;
+}
+
 .pdf-page-image-button {
   background: transparent;
   border-radius: 0;

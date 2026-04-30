@@ -15,7 +15,7 @@ const MAX_TOTAL_CHARS = 42000;
 const MAX_SECTION_CHARS = 3600;
 const MAX_FOLLOW_UP_SECTION_CHARS = 9000;
 const INTERPRETATION_GUIDANCE =
-  "For each section.interpretation, write a simple, quick-scan 'What this means' explanation. Use a real markdown bullet list by default: each item must start on its own line with '- '. Inside JSON/NDJSON strings, encode those line breaks as \\n. Keep it to 2-4 bullets. Use a compact markdown table only when comparison is clearer. Do not put bullets inline in one sentence. Avoid dense paragraphs, abstract wording, and long caveats. Put the most important takeaway in **bold**.";
+  "For each section.interpretation, write a 'What this means' explanation that is long enough for learning. Use a real markdown bullet list by default: each item must start on its own line with '- '. Inside JSON/NDJSON strings, encode those line breaks as \\n. Keep it to 2-4 bullets， more is okay if the section contains substantial content. Use a compact markdown table only when comparison is clearer. Do not put bullets inline in one sentence. Avoid dense paragraphs, abstract wording, and long caveats. Put the most important takeaway in **bold**.";
 
 // , for example '- **Why it matters:** ...\\n- **Use it for:** ...\\n- **Watch out:** ...'
 
@@ -133,12 +133,20 @@ export async function analyzeArticleProgressively(
     throw new Error("Model response did not include a readable stream.");
   }
 
-  const knownIds = new Set(article.sections.map((section) => section.id));
+  return readProgressiveAnalysisStream(response.body, article.sections, onProgress);
+}
+
+async function readProgressiveAnalysisStream(
+  body: ReadableStream<Uint8Array>,
+  sourceSections: ExtractedSection[],
+  onProgress: (event: AnalysisProgressEvent) => void
+): Promise<AnalysisResult> {
+  const knownIds = new Set(sourceSections.map((section) => section.id));
   const sections: AnalysisSection[] = [];
   let overall: AnalysisResult["overall"] | null = null;
   let contentBuffer = "";
 
-  for await (const content of readOpenAIStream(response.body)) {
+  for await (const content of readOpenAIStream(body)) {
     contentBuffer += content;
     const lines = contentBuffer.split(/\r?\n/);
     contentBuffer = lines.pop() ?? "";
@@ -172,15 +180,93 @@ export async function analyzeArticleProgressively(
     throw new Error("Model stream did not include an overall analysis object.");
   }
 
-  const uniqueSections = article.sections
+  const uniqueSections = sourceSections
     .map((sourceSection) => sections.find((section) => section.id === sourceSection.id))
     .filter((section): section is AnalysisSection => Boolean(section));
 
-  if (uniqueSections.length !== article.sections.length) {
-    throw new Error(`Model stream returned ${uniqueSections.length} of ${article.sections.length} section analyses.`);
+  if (uniqueSections.length !== sourceSections.length) {
+    throw new Error(`Model stream returned ${uniqueSections.length} of ${sourceSections.length} section analyses.`);
   }
 
   return { overall, sections: uniqueSections };
+}
+
+export async function analyzePdfProgressively({
+  article,
+  pageImages,
+  settings,
+  onProgress
+}: {
+  article: ExtractedArticle;
+  pageImages: PdfPageImage[];
+  settings: Settings;
+  onProgress: (event: AnalysisProgressEvent) => void;
+}): Promise<AnalysisResult> {
+  const apiKey = getActivePdfApiKey(settings);
+  if (!apiKey) {
+    throw new Error("Missing PDF API key. Open the extension settings and add your PDF API key.");
+  }
+
+  const pdfEndpoint = settings.pdfEndpoint.trim();
+  const pdfModel = settings.pdfModel.trim();
+  if (!pdfEndpoint) {
+    throw new Error("Missing PDF endpoint. Open the extension settings and add your PDF endpoint.");
+  }
+  if (!pdfModel) {
+    throw new Error("Missing PDF parsing model. Open the extension settings and add a PDF parsing model.");
+  }
+
+  const response = await fetch(pdfEndpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json"
+    },
+    body: JSON.stringify({
+      model: pdfModel,
+      max_tokens: Math.max(2600, Math.min(16000, pageImages.length * 520)),
+      temperature: 0.2,
+      stream: true,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a rigorous reading and learning assistant. Return only newline-delimited JSON objects. Do not wrap the output in markdown."
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: buildPdfProgressivePrompt(article, pageImages.map((image) => image.page), settings.outputLanguage)
+            },
+            ...pageImages.map((image) => ({
+              type: "image_url",
+              image_url: {
+                url: image.dataUrl
+              }
+            }))
+          ]
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as OpenAIResponse | null;
+    const raw = body ? JSON.stringify(body).slice(0, 4000) : "";
+    const error = new Error(body?.error?.message ?? `Model request failed with HTTP ${response.status}`) as Error & {
+      raw?: string;
+    };
+    error.raw = raw;
+    throw error;
+  }
+  if (!response.body) {
+    throw new Error("Model response did not include a readable stream.");
+  }
+
+  return readProgressiveAnalysisStream(response.body, article.sections, onProgress);
 }
 
 export async function analyzeArticleOverview(
@@ -647,9 +733,9 @@ function buildProgressivePrompt(article: ExtractedArticle, outputLanguage: Outpu
   const languageInstruction =
     outputLanguage === "follow-page"
       ? [
-          `Use the same language as the article when possible. Detected page language: ${article.language || "unknown"}.`,
-          "Every user-facing JSON string value must use that page language. Keep JSON keys type, id, summary, why_read, interpretation, and role_in_article exactly as written."
-        ].join(" ")
+        `Use the same language as the article when possible. Detected page language: ${article.language || "unknown"}.`,
+        "Every user-facing JSON string value must use that page language. Keep JSON keys type, id, summary, why_read, interpretation, and role_in_article exactly as written."
+      ].join(" ")
       : outputLanguage === "zh"
         ? "Write every user-facing JSON string value in Chinese. Keep JSON keys type, id, summary, why_read, interpretation, and role_in_article exactly as written."
         : "Write every user-facing JSON string value in English. Keep JSON keys type, id, summary, why_read, interpretation, and role_in_article exactly as written.";
@@ -670,6 +756,19 @@ function buildProgressivePrompt(article: ExtractedArticle, outputLanguage: Outpu
     "Do not invent section ids. Include one section line per input section.",
     "",
     formatArticleForPrompt(article)
+  ].join("\n");
+}
+
+function buildPdfProgressivePrompt(article: ExtractedArticle, pages: number[], outputLanguage: OutputLanguage): string {
+  const basePrompt = buildProgressivePrompt(article, outputLanguage);
+  return [
+    basePrompt,
+    "",
+    "PDF-specific input rules:",
+    `The attached images are PDF pages ${pages.join(", ")} in the same order as the input sections.`,
+    "Treat each PDF page as one article section. Use the page screenshot as the source of truth for that section.",
+    "For section.role_in_article, explain how this page changes or advances the PDF by referencing all pages when useful.",
+    "If a page is mostly cover, references, agenda, or blank space, still analyze its actual role instead of skipping it."
   ].join("\n");
 }
 
@@ -749,18 +848,18 @@ function buildSectionQuestionPrompt({
 
   const cachedAnalysis = sectionAnalysis
     ? [
-        "Cached section analysis:",
-        `summary: ${sectionAnalysis.summary}`,
-        `interpretation: ${sectionAnalysis.interpretation}`,
-        `role_in_article: ${sectionAnalysis.role_in_article}`
-      ].join("\n")
+      "Cached section analysis:",
+      `summary: ${sectionAnalysis.summary}`,
+      `interpretation: ${sectionAnalysis.interpretation}`,
+      `role_in_article: ${sectionAnalysis.role_in_article}`
+    ].join("\n")
     : "Cached section analysis: not available.";
 
   const prior = priorFollowUps.length
     ? priorFollowUps
-        .slice(-4)
-        .map((item, index) => `Q${index + 1}: ${item.question}\nA${index + 1}: ${item.answer}`)
-        .join("\n\n")
+      .slice(-4)
+      .map((item, index) => `Q${index + 1}: ${item.question}\nA${index + 1}: ${item.answer}`)
+      .join("\n\n")
     : "No prior follow-up questions for this section.";
 
   return [
