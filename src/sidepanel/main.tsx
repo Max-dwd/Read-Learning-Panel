@@ -40,6 +40,20 @@ import type {
 } from "../shared/types";
 import "./styles.css";
 
+const PDF_GUIDE_STORAGE_PREFIX = "learnPanelPdfGuide_";
+
+async function savePdfGuide(sourceUrl: string, guide: PdfGuideResult): Promise<void> {
+  const key = PDF_GUIDE_STORAGE_PREFIX + sourceUrl;
+  await chrome.storage.local.set({ [key]: guide });
+}
+
+async function loadSavedPdfGuide(sourceUrl: string): Promise<PdfGuideResult | null> {
+  const key = PDF_GUIDE_STORAGE_PREFIX + sourceUrl;
+  const stored = await chrome.storage.local.get(key);
+  const guide = stored[key];
+  return guide && Array.isArray(guide.pages) ? guide : null;
+}
+
 type LoadState = "idle" | "loading" | "ready" | "error";
 type AnalyzeState = "idle" | "running" | "done" | "error";
 type SectionAnalyzeState = "queued" | "running" | "done" | "error";
@@ -472,7 +486,10 @@ function App() {
     setPdfTargetPage(String(targetPage));
     setPdfQuestion("");
     setPdfAnswers([]);
-    setPdfGuide(null);
+
+    // Restore saved guide for this PDF
+    const savedGuide = await loadSavedPdfGuide(loadedPdf.sourceUrl);
+    setPdfGuide(savedGuide);
     setPdfGuideState("idle");
     setPdfGuideError("");
     setPdfGuideRawError("");
@@ -809,6 +826,7 @@ function App() {
       });
       setPdfGuide(guide);
       setPdfGuideState("idle");
+      void savePdfGuide(loadedPdf.sourceUrl, guide);
     } catch (error) {
       const typedError = error as Error & { raw?: string };
       setPdfGuideState("error");
@@ -1509,11 +1527,12 @@ function PdfReader({
                 className={`pdf-page-card${image.page === focusedPage ? " active" : ""}${image.page === followedPdfPage ? " followed" : ""}`}
                 data-learn-panel-pdf-page={image.page}
                 key={image.page}
+                onClick={() => onFocusPage(image.page)}
               >
-                <button type="button" className="pdf-page-header" onClick={() => onFocusPage(image.page)}>
+                <div className="pdf-page-header">
                   <span>Page {image.page}</span>
                   {image.page === focusedPage && <strong>Focus</strong>}
-                </button>
+                </div>
                 {pageGuide ? (
                   <div className="pdf-page-guide">
                     <InfoBlock title="Summary" body={pageGuide.summary} />
@@ -1521,9 +1540,9 @@ function PdfReader({
                     <InfoBlock title="Goal" body={pageGuide.goal} />
                   </div>
                 ) : (
-                  <button type="button" className="pdf-page-image-button" onClick={() => onFocusPage(image.page)}>
+                  <div className="pdf-page-image-button">
                     <img src={image.dataUrl} alt={`PDF page ${image.page}`} loading="lazy" />
-                  </button>
+                  </div>
                 )}
               </article>
             );
