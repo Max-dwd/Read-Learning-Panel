@@ -411,19 +411,14 @@ function getCoordinateBase(
   const values = blocks.flatMap((block) => block.bbox ?? []);
   const max = Math.max(...values, 1);
   if (max <= 1) {
+    // Normalized [0,1] coordinates
     return { xMin: 0, yMin: 0, width: 1, height: 1 };
   }
 
-  if (pageSize) {
-    if (pageBBox && isFullPageBBox(pageBBox, blocks, pageSize)) {
-      const [x1, y1, x2, y2] = pageBBox;
-      const width = Math.max(1, x2 - x1);
-      const height = Math.max(1, y2 - y1);
-      return { xMin: x1, yMin: y1, width, height };
-    }
-    return { xMin: 0, yMin: 0, width: pageSize.width, height: pageSize.height };
-  }
-
+  // Always prefer pageBBox: it is guaranteed to be in the same coordinate
+  // system as the block bboxes (both come from Datalab).  Using pageSize
+  // (pdf.js viewport points at 72 DPI) mixes coordinate systems and causes
+  // visible offset when Datalab uses a different rendering resolution.
   if (pageBBox) {
     const [x1, y1, x2, y2] = pageBBox;
     const width = Math.max(1, x2 - x1);
@@ -431,26 +426,16 @@ function getCoordinateBase(
     return { xMin: x1, yMin: y1, width, height };
   }
 
+  // Fallback: scale Datalab coordinates to match the pdf.js page dimensions.
+  // This works when both happen to use the same DPI (most common case).
+  if (pageSize) {
+    return { xMin: 0, yMin: 0, width: pageSize.width, height: pageSize.height };
+  }
+
+  // Last resort: infer the coordinate space from the blocks themselves.
   const maxX = Math.max(...blocks.map((block) => block.bbox?.[2] ?? 1), 1);
   const maxY = Math.max(...blocks.map((block) => block.bbox?.[3] ?? 1), 1);
   return { xMin: 0, yMin: 0, width: maxX, height: maxY };
-}
-
-function isFullPageBBox(pageBBox: PdfBoundingBox, blocks: DeepPdfBlock[], pageSize: PageSize): boolean {
-  const [x1, y1, x2, y2] = pageBBox;
-  const width = x2 - x1;
-  const height = y2 - y1;
-  if (width <= 0 || height <= 0) {
-    return false;
-  }
-
-  const maxBlockX = Math.max(...blocks.map((block) => block.bbox?.[2] ?? 0), 0);
-  const maxBlockY = Math.max(...blocks.map((block) => block.bbox?.[3] ?? 0), 0);
-  const hasPageMargin = width > maxBlockX * 1.02 || height > maxBlockY * 1.02;
-  const pageAspect = pageSize.width / Math.max(1, pageSize.height);
-  const bboxAspect = width / height;
-  const aspectDelta = Math.abs(pageAspect - bboxAspect) / Math.max(pageAspect, bboxAspect);
-  return hasPageMargin && aspectDelta < 0.08;
 }
 
 function clampPercent(value: number): number {

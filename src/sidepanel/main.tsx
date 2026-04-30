@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import katex from "katex";
 import {
   clearAnalysisSessions,
   deleteAnalysisSession,
@@ -51,6 +52,7 @@ import type {
   SectionFollowUp,
   Settings
 } from "../shared/types";
+import "katex/dist/katex.min.css";
 import "./styles.css";
 
 const PDF_GUIDE_STORAGE_PREFIX = "learnPanelPdfGuide_";
@@ -2309,6 +2311,13 @@ function MarkupBlocks({ text }: { text: string }) {
       continue;
     }
 
+    const mathBlock = readMathBlock(lines, index);
+    if (mathBlock) {
+      blocks.push(<MathFormula key={`math-${index}`} formula={mathBlock.formula} display />);
+      index = mathBlock.nextIndex;
+      continue;
+    }
+
     if (isMarkdownTableStart(lines, index)) {
       const tableLines: string[] = [];
       while (index < lines.length && lines[index].trim().startsWith("|")) {
@@ -2342,6 +2351,7 @@ function MarkupBlocks({ text }: { text: string }) {
       index < lines.length &&
       lines[index].trim() &&
       !isListLine(lines[index]) &&
+      !isMathBlockStart(lines[index]) &&
       !isMarkdownTableStart(lines, index)
     ) {
       paragraphLines.push(lines[index]);
@@ -2429,25 +2439,204 @@ function parseTableRow(line: string) {
     .map((cell) => cell.trim());
 }
 
+type InlineMarkupToken =
+  | { type: "text"; value: string }
+  | { type: "strong"; value: string }
+  | { type: "code"; value: string }
+  | { type: "math"; value: string; display: boolean };
+
+type InlineMarkupMatch = {
+  start: number;
+  end: number;
+  token: InlineMarkupToken;
+};
+
+const MATH_BLOCK_DELIMITERS = [
+  { open: "\\[", close: "\\]" },
+  { open: "\\\\[", close: "\\\\]" },
+  { open: "$$", close: "$$" }
+] as const;
+
+function readMathBlock(lines: string[], index: number) {
+  const trimmed = lines[index].trim();
+  const delimiter = MATH_BLOCK_DELIMITERS.find((item) => trimmed.startsWith(item.open));
+  if (!delimiter) {
+    return null;
+  }
+
+  let current = trimmed.slice(delimiter.open.length);
+  const formulaLines: string[] = [];
+  let currentIndex = index;
+
+  while (currentIndex < lines.length) {
+    const closeIndex = current.indexOf(delimiter.close);
+    if (closeIndex >= 0) {
+      formulaLines.push(current.slice(0, closeIndex));
+      return {
+        formula: formulaLines.join("\n").trim(),
+        nextIndex: currentIndex + 1
+      };
+    }
+
+    formulaLines.push(current);
+    currentIndex += 1;
+    current = lines[currentIndex] ?? "";
+  }
+
+  return null;
+}
+
+function isMathBlockStart(line: string) {
+  const trimmed = line.trim();
+  return MATH_BLOCK_DELIMITERS.some((item) => trimmed.startsWith(item.open));
+}
+
 function InlineMarkup({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[\s\S]+?\*\*|`[^`]+`)/g);
+  const parts = tokenizeInlineMarkup(text);
   return (
     <>
       {parts.map((part, index) => {
-        if (part.startsWith("**") && part.endsWith("**")) {
+        if (part.type === "strong") {
           return (
-            <strong key={`${part}-${index}`}>
-              <InlineMarkup text={part.slice(2, -2)} />
+            <strong key={`${part.value}-${index}`}>
+              <InlineMarkup text={part.value} />
             </strong>
           );
         }
-        if (part.startsWith("`") && part.endsWith("`")) {
-          return <code key={`${part}-${index}`}>{part.slice(1, -1)}</code>;
+        if (part.type === "code") {
+          return <code key={`${part.value}-${index}`}>{part.value}</code>;
         }
-        return <React.Fragment key={`${part}-${index}`}>{part}</React.Fragment>;
+        if (part.type === "math") {
+          return <MathFormula key={`${part.value}-${index}`} formula={part.value} display={part.display} block={false} />;
+        }
+        return <React.Fragment key={`${part.value}-${index}`}>{part.value}</React.Fragment>;
       })}
     </>
   );
+}
+
+function tokenizeInlineMarkup(text: string): InlineMarkupToken[] {
+  const tokens: InlineMarkupToken[] = [];
+  let index = 0;
+
+  while (index < text.length) {
+    const next = findNextInlineMarkup(text, index);
+    if (!next) {
+      tokens.push({ type: "text", value: text.slice(index) });
+      break;
+    }
+
+    if (next.start > index) {
+      tokens.push({ type: "text", value: text.slice(index, next.start) });
+    }
+    tokens.push(next.token);
+    index = next.end;
+  }
+
+  return tokens.filter((token) => token.value.length > 0);
+}
+
+function findNextInlineMarkup(text: string, from: number): InlineMarkupMatch | null {
+  const candidates = [
+    findDelimitedToken(text, from, "`", "`", "code"),
+    findDelimitedToken(text, from, "**", "**", "strong"),
+    findDelimitedToken(text, from, "\\(", "\\)", "math", false),
+    findDelimitedToken(text, from, "\\\\(", "\\\\)", "math", false),
+    findDelimitedToken(text, from, "\\[", "\\]", "math", true),
+    findDelimitedToken(text, from, "\\\\[", "\\\\]", "math", true),
+    findDelimitedToken(text, from, "$$", "$$", "math", true),
+    findDollarMathToken(text, from)
+  ].filter((candidate): candidate is InlineMarkupMatch => candidate !== null);
+
+  return candidates.sort((left, right) => left.start - right.start)[0] ?? null;
+}
+
+function findDelimitedToken(
+  text: string,
+  from: number,
+  open: string,
+  close: string,
+  type: "strong" | "code" | "math",
+  display = false
+) {
+  const start = text.indexOf(open, from);
+  if (start < 0) {
+    return null;
+  }
+  const valueStart = start + open.length;
+  const closeIndex = text.indexOf(close, valueStart);
+  if (closeIndex < 0) {
+    return null;
+  }
+
+  return {
+    start,
+    end: closeIndex + close.length,
+    token: {
+      type,
+      value: text.slice(valueStart, closeIndex),
+      ...(type === "math" ? { display } : {})
+    } as InlineMarkupToken
+  } satisfies InlineMarkupMatch;
+}
+
+function findDollarMathToken(text: string, from: number) {
+  let start = text.indexOf("$", from);
+  while (start >= 0) {
+    const previous = text[start - 1] ?? "";
+    const next = text[start + 1] ?? "";
+    if (next !== "$" && previous !== "\\" && next.trim() && !/[\d,.]/.test(next)) {
+      const close = findClosingDollar(text, start + 1);
+      if (close >= 0) {
+        return {
+          start,
+          end: close + 1,
+          token: {
+            type: "math",
+            value: text.slice(start + 1, close),
+            display: false
+          } as InlineMarkupToken
+        } satisfies InlineMarkupMatch;
+      }
+    }
+    start = text.indexOf("$", start + 1);
+  }
+
+  return null;
+}
+
+function findClosingDollar(text: string, from: number) {
+  let index = text.indexOf("$", from);
+  while (index >= 0) {
+    const previous = text[index - 1] ?? "";
+    const next = text[index + 1] ?? "";
+    if (previous !== "\\" && next !== "$" && previous.trim()) {
+      return index;
+    }
+    index = text.indexOf("$", index + 1);
+  }
+
+  return -1;
+}
+
+function MathFormula({ formula, display, block = display }: { formula: string; display: boolean; block?: boolean }) {
+  const html = useMemo(
+    () =>
+      katex.renderToString(formula, {
+        displayMode: display,
+        output: "html",
+        strict: "ignore",
+        throwOnError: false,
+        trust: false
+      }),
+    [display, formula]
+  );
+
+  if (block) {
+    return <div className="math-formula math-formula-display" dangerouslySetInnerHTML={{ __html: html }} />;
+  }
+
+  return <span className="math-formula math-formula-inline" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
 function scrollPanelToSection(sectionId: string) {

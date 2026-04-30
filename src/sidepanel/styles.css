@@ -555,6 +555,33 @@ h3 {
   font-weight: 750;
 }
 
+.math-formula {
+  color: #111827;
+}
+
+.math-formula-inline {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: -0.12em;
+}
+
+.math-formula-display {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 13px;
+  margin: 2px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 10px;
+}
+
+.math-formula .katex-display {
+  margin: 0;
+}
+
 .info-block p strong,
 .markup-list strong,
 .markup-table strong,
