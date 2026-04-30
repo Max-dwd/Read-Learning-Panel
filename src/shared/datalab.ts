@@ -236,7 +236,7 @@ function normalizeBlock(
   };
 }
 
-function extractPageBboxes(result: DatalabPollResponse, blocks: DeepPdfBlock[]): Record<number, PdfBoundingBox> {
+function extractPageBboxes(result: DatalabPollResponse, _blocks: DeepPdfBlock[]): Record<number, PdfBoundingBox> {
   const bboxes: Record<number, PdfBoundingBox> = {};
   const pageObjects = readPageObjects(result.json);
 
@@ -249,12 +249,6 @@ function extractPageBboxes(result: DatalabPollResponse, blocks: DeepPdfBlock[]):
     }
   }
 
-  for (const [page, bbox] of Object.entries(buildPageBboxesFromBlocks(blocks))) {
-    if (!bboxes[Number(page)]) {
-      bboxes[Number(page)] = bbox;
-    }
-  }
-
   return bboxes;
 }
 
@@ -264,26 +258,6 @@ function readPageObjects(value: unknown): RawDatalabBlock[] {
   }
   const pages = (value as { pages?: unknown }).pages;
   return Array.isArray(pages) ? pages.filter(isObject) as RawDatalabBlock[] : [];
-}
-
-function buildPageBboxesFromBlocks(blocks: DeepPdfBlock[]): Record<number, PdfBoundingBox> {
-  const bounds: Record<number, PdfBoundingBox> = {};
-  for (const block of blocks) {
-    if (!block.bbox) {
-      continue;
-    }
-    const [x1, y1, x2, y2] = block.bbox;
-    const existing = bounds[block.page];
-    bounds[block.page] = existing
-      ? [
-          Math.min(existing[0], x1, 0),
-          Math.min(existing[1], y1, 0),
-          Math.max(existing[2], x2),
-          Math.max(existing[3], y2)
-        ]
-      : [Math.min(x1, 0), Math.min(y1, 0), x2, y2];
-  }
-  return bounds;
 }
 
 function buildSectionsFromBlocks(blocks: DeepPdfBlock[], pdfDocument: LoadedPdfDocument): DeepPdfSection[] {

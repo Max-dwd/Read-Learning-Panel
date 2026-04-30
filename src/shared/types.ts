@@ -81,6 +81,7 @@ export type PdfBoundingBox = [number, number, number, number];
 
 export type DeepPdfBlock = {
   id: string;
+  sectionId?: string;
   page: number;
   type: string;
   text: string;
@@ -129,7 +130,8 @@ export type ContentRequest =
       sectionId: string;
       blocks: DeepPdfBlock[];
       pageBboxes?: Record<number, PdfBoundingBox>;
-    };
+    }
+  | { type: "LEARN_VIEWER_FOCUS_PDF_SECTION"; sectionId: string };
 
 export type ContentResponse =
   | { ok: true; article: ExtractedArticle }

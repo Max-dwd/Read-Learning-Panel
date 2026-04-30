@@ -42,6 +42,7 @@ import type {
   AnalysisResult,
   ContentRequest,
   ContentResponse,
+  DeepPdfBlock,
   DeepPdfParseResult,
   DeepPdfSection,
   ExtractedArticle,
@@ -102,9 +103,13 @@ function isCustomPdfViewerUrl(url: string | undefined): boolean {
   }
 }
 
-function getCustomViewerUrl(pdfSourceUrl: string): string {
-  const viewerBase = chrome.runtime.getURL("dist/pdfviewer.html");
-  return `${viewerBase}?src=${encodeURIComponent(pdfSourceUrl)}`;
+function getCustomViewerUrl(pdfSourceUrl: string, options: { deepRange?: string } = {}): string {
+  const url = new URL(chrome.runtime.getURL("dist/pdfviewer.html"));
+  url.searchParams.set("src", pdfSourceUrl);
+  if (options.deepRange !== undefined) {
+    url.searchParams.set("deepRange", options.deepRange);
+  }
+  return url.toString();
 }
 type PdfAnswer = {
   question: string;
@@ -165,6 +170,7 @@ function App() {
   const [deepPdfParseError, setDeepPdfParseError] = useState("");
   const [deepPdfParseRawError, setDeepPdfParseRawError] = useState("");
   const [activeDeepPdfSectionId, setActiveDeepPdfSectionId] = useState<string | null>(null);
+  const [showAllDeepPdfBoundingBoxes, setShowAllDeepPdfBoundingBoxes] = useState(false);
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
   const [pendingQuestions, setPendingQuestions] = useState<Record<string, boolean>>({});
   const [questionErrors, setQuestionErrors] = useState<Record<string, string>>({});
@@ -198,6 +204,30 @@ function App() {
   useEffect(() => {
     followEnabledRef.current = followEnabled;
   }, [followEnabled]);
+
+  useEffect(() => {
+    const handleViewerMessage = (
+      request: ContentRequest,
+      _sender: chrome.runtime.MessageSender,
+      sendResponse: (response: ContentResponse) => void
+    ) => {
+      if (request.type !== "LEARN_VIEWER_FOCUS_PDF_SECTION") {
+        return false;
+      }
+
+      setViewMode("reader");
+      setPdfAnalysisMode("deep");
+      setActiveDeepPdfSectionId(request.sectionId);
+      requestAnimationFrame(() => scrollPanelToSection(request.sectionId));
+      sendResponse({ ok: true });
+      return false;
+    };
+
+    chrome.runtime?.onMessage?.addListener(handleViewerMessage);
+    return () => {
+      chrome.runtime?.onMessage?.removeListener(handleViewerMessage);
+    };
+  }, []);
 
   useEffect(() => {
     if (!followEnabled || viewMode !== "reader" || loadState !== "ready") {
@@ -318,7 +348,9 @@ function App() {
       if (changeInfo.url) {
         const currentPdf = pdfDocumentRef.current;
         const nextPdfSource = getPdfSourceUrl(changeInfo.url);
-        if (currentPdf && nextPdfSource === currentPdf.sourceUrl) {
+        const nextDeepRange = getDeepPdfRangeFromViewerUrl(changeInfo.url);
+        const currentDeepRange = currentPdf ? getDeepPdfRangeFromViewerUrl(currentPdf.url) : null;
+        if (currentPdf && nextPdfSource === currentPdf.sourceUrl && nextDeepRange === currentDeepRange) {
           const nextPage = Math.min(getPdfTargetPageFromUrl(changeInfo.url), currentPdf.pageCount);
           const nextPdf = { ...currentPdf, url: changeInfo.url };
           pdfDocumentRef.current = nextPdf;
@@ -355,6 +387,7 @@ function App() {
         setDeepPdfParseError("");
         setDeepPdfParseRawError("");
         setActiveDeepPdfSectionId(null);
+        setShowAllDeepPdfBoundingBoxes(false);
         setPdfError("");
         setPdfRawError("");
         setPdfQuestionState("idle");
@@ -423,6 +456,7 @@ function App() {
       setDeepPdfParseError("");
       setDeepPdfParseRawError("");
       setActiveDeepPdfSectionId(null);
+      setShowAllDeepPdfBoundingBoxes(false);
       setFollowedSectionId(null);
       setFollowedPdfPage(null);
 
@@ -525,6 +559,7 @@ function App() {
     setDeepPdfParseError("");
     setDeepPdfParseRawError("");
     setActiveDeepPdfSectionId(null);
+    setShowAllDeepPdfBoundingBoxes(false);
     setFollowedSectionId(null);
     setFollowedPdfPage(null);
     currentPageKeyRef.current = tabUrl;
@@ -545,7 +580,8 @@ function App() {
     const pageKey = getPageKey(pdfArticle.url);
     pdfDocumentRef.current = loadedPdf;
     setPdfDocument(loadedPdf);
-    setPdfPageRange("all");
+    const requestedDeepRange = getDeepPdfRangeFromViewerUrl(tabUrl);
+    setPdfPageRange(requestedDeepRange ? fromDatalabPageRangeLabel(requestedDeepRange) : "all");
     setPdfTargetPage(String(targetPage));
     setPdfQuestion("");
     setPdfAnswers([]);
@@ -556,10 +592,16 @@ function App() {
     setPdfGuideState("idle");
     setPdfGuideError("");
     setPdfGuideRawError("");
-    const savedDeepParse = await loadSavedDeepPdfParse(loadedPdf.sourceUrl, "");
+    const savedDeepParse = await loadSavedDeepPdfParse(loadedPdf.sourceUrl, requestedDeepRange ?? "");
     setDeepPdfParse(savedDeepParse);
     setDeepPdfParseState(savedDeepParse ? "done" : "idle");
     setDeepPdfParseStatus(savedDeepParse ? "Loaded saved deep parse." : "");
+
+    if (requestedDeepRange !== null && savedDeepParse) {
+      await applyDeepPdfParse(savedDeepParse, { restoreSaved: !force });
+      void renderPdfPreview(loadedPdf);
+      return;
+    }
 
     const persistedSession = !force ? await loadAnalysisSession(pageKey) : null;
     if (persistedSession) {
@@ -972,7 +1014,17 @@ function App() {
         `Parsed ${result.sections.length} sections from ${result.blocks.length} blocks${datalabPageRange ? ` on pages ${formatPages(pages)}` : ""}.`
       );
       await saveDeepPdfParse(loadedPdf.sourceUrl, datalabPageRange, result);
-      applyDeepPdfParse(result);
+      const parsedArticle = buildDeepPdfArticle(result);
+      const parsedPageKey = getDeepPdfPageKey(result.sourceUrl, result.pageRange);
+      cacheRef.current.set(parsedPageKey, { article: parsedArticle, analysis: null, followUps: {} });
+      setHistory(
+        await saveHistoryEntry({
+          article: parsedArticle,
+          analysis: null,
+          followUps: {}
+        })
+      );
+      await applyDeepPdfParse(result);
     } catch (error) {
       const typedError = error as Error & { raw?: string };
       setDeepPdfParseState("error");
@@ -984,6 +1036,7 @@ function App() {
   function switchPdfAnalysisMode(mode: PdfAnalysisMode) {
     setPdfAnalysisMode(mode);
     setActiveDeepPdfSectionId(null);
+    setShowAllDeepPdfBoundingBoxes(false);
     void sendToViewer({ type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS", sectionId: "", blocks: [] }).catch(() => undefined);
 
     const loadedPdf = pdfDocumentRef.current;
@@ -1012,7 +1065,7 @@ function App() {
     }
 
     if (deepPdfParse && deepPdfParse.pageRange === currentDatalabPageRange) {
-      applyDeepPdfParse(deepPdfParse);
+      void applyDeepPdfParse(deepPdfParse, { restoreSaved: true });
       return;
     }
 
@@ -1034,21 +1087,44 @@ function App() {
         setDeepPdfParse(saved);
         setDeepPdfParseState("done");
         setDeepPdfParseStatus(`Loaded saved deep parse${datalabPageRange ? ` for pages ${formatPages(pages)}` : ""}.`);
-        applyDeepPdfParse(saved);
+        await applyDeepPdfParse(saved, { restoreSaved: true });
       }
     } catch {
       // Keep the panel usable if the range input is temporarily invalid.
     }
   }
 
-  function applyDeepPdfParse(result: DeepPdfParseResult) {
+  async function applyDeepPdfParse(result: DeepPdfParseResult, options: { restoreSaved?: boolean } = {}) {
     setPdfAnalysisMode("deep");
     const articleFromParse = buildDeepPdfArticle(result);
     const pageKey = getDeepPdfPageKey(result.sourceUrl, result.pageRange);
+
+    if (options.restoreSaved) {
+      const persistedSession = await loadAnalysisSession(pageKey);
+      if (persistedSession) {
+        applyAnalysisSession(persistedSession);
+        return;
+      }
+    }
+
     const cached = cacheRef.current.get(pageKey);
     if (cached) {
       applyPageCache(cached, pageKey);
       return;
+    }
+
+    if (options.restoreSaved) {
+      const persisted = await findHistoryEntry(articleFromParse.url);
+      if (persisted) {
+        cacheRef.current.set(pageKey, {
+          article: persisted.article,
+          analysis: persisted.analysis,
+          followUps: persisted.followUps,
+          scrollPos: persisted.scrollPos
+        });
+        applyPage(persisted.article, persisted.analysis, pageKey);
+        return;
+      }
     }
 
     cacheRef.current.set(pageKey, { article: articleFromParse, analysis: null, followUps: {} });
@@ -1060,11 +1136,27 @@ function App() {
     void sendToViewer({
       type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS",
       sectionId: section.id,
-      blocks: section.blocks,
+      blocks: showAllDeepPdfBoundingBoxes && deepPdfParse ? getDeepPdfBlocksForViewer(deepPdfParse) : tagDeepPdfSectionBlocks(section),
       pageBboxes: deepPdfParse?.pageBboxes
     }).catch(() => undefined);
     const firstBlockPage = section.blocks[0]?.page ?? section.pageStart;
     setPdfTargetPage(String(firstBlockPage));
+  }
+
+  function toggleDeepPdfBoundingBoxes() {
+    const nextVisible = !showAllDeepPdfBoundingBoxes;
+    setShowAllDeepPdfBoundingBoxes(nextVisible);
+    if (!nextVisible || !deepPdfParse) {
+      void sendToViewer({ type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS", sectionId: "", blocks: [] }).catch(() => undefined);
+      return;
+    }
+
+    void sendToViewer({
+      type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS",
+      sectionId: activeDeepPdfSectionId ?? "",
+      blocks: getDeepPdfBlocksForViewer(deepPdfParse),
+      pageBboxes: deepPdfParse.pageBboxes
+    }).catch(() => undefined);
   }
 
   async function getPdfImagesForPages(loadedPdf: LoadedPdfDocument, pages: number[]): Promise<PdfPageImage[]> {
@@ -1267,7 +1359,11 @@ function App() {
     if (entry.article.siteName === "PDF" || entry.article.siteName === "PDF Deep") {
       setViewMode("reader");
       const tab = await getActiveTab();
-      await chrome.tabs.update(tab.id, { url: getCustomViewerUrl(getPdfSourceFromArticleUrl(entry.article.url)) });
+      await chrome.tabs.update(tab.id, {
+        url: getCustomViewerUrl(getPdfSourceFromArticleUrl(entry.article.url), {
+          deepRange: entry.article.siteName === "PDF Deep" ? getDeepPdfRangeFromArticleUrl(entry.article.url) : undefined
+        })
+      });
       return;
     }
 
@@ -1418,6 +1514,7 @@ function App() {
           deepPdfParseError={deepPdfParseError}
           deepPdfParseRawError={deepPdfParseRawError}
           activeDeepPdfSectionId={activeDeepPdfSectionId}
+          showAllDeepPdfBoundingBoxes={showAllDeepPdfBoundingBoxes}
           analysis={analysis}
           analysisState={analysisState}
           analysisError={analysisError}
@@ -1438,6 +1535,7 @@ function App() {
           onParseDeepPdf={() => void runDeepPdfParse()}
           onModeChange={switchPdfAnalysisMode}
           onFocusDeepSection={focusDeepPdfSection}
+          onToggleDeepBoundingBoxes={toggleDeepPdfBoundingBoxes}
           onFocusPage={(page) => {
             setPdfTargetPage(String(page));
             setPdfPageRange("all");
@@ -1650,6 +1748,7 @@ function PdfReader({
   deepPdfParseError,
   deepPdfParseRawError,
   activeDeepPdfSectionId,
+  showAllDeepPdfBoundingBoxes,
   analysis,
   analysisState,
   analysisError,
@@ -1670,6 +1769,7 @@ function PdfReader({
   onParseDeepPdf,
   onModeChange,
   onFocusDeepSection,
+  onToggleDeepBoundingBoxes,
   onFocusPage,
   onAsk,
   onOpenSettings
@@ -1692,6 +1792,7 @@ function PdfReader({
   deepPdfParseError: string;
   deepPdfParseRawError: string;
   activeDeepPdfSectionId: string | null;
+  showAllDeepPdfBoundingBoxes: boolean;
   analysis: AnalysisResult | null;
   analysisState: AnalyzeState;
   analysisError: string;
@@ -1712,6 +1813,7 @@ function PdfReader({
   onParseDeepPdf: () => void;
   onModeChange: (mode: PdfAnalysisMode) => void;
   onFocusDeepSection: (section: DeepPdfSection) => void;
+  onToggleDeepBoundingBoxes: () => void;
   onFocusPage: (page: number) => void;
   onAsk: () => void;
   onOpenSettings: () => void;
@@ -1798,6 +1900,9 @@ function PdfReader({
             </button>
             <button className="pdf-guide-button" type="button" disabled={!canAnalyze} onClick={onGenerateGuide}>
               {analysisState === "running" ? "Analyzing sections..." : analysis ? "Re-analyze sections" : "Analyze parsed sections"}
+            </button>
+            <button className="secondary-button" type="button" disabled={!deepPdfParse} onClick={onToggleDeepBoundingBoxes}>
+              {showAllDeepPdfBoundingBoxes ? "Hide bounding boxes" : "Show bounding boxes"}
             </button>
           </div>
         ) : (
@@ -2397,6 +2502,17 @@ function buildDeepPdfArticle(result: DeepPdfParseResult): ExtractedArticle {
   };
 }
 
+function tagDeepPdfSectionBlocks(section: DeepPdfSection): DeepPdfBlock[] {
+  return section.blocks.map((block) => ({
+    ...block,
+    sectionId: section.id
+  }));
+}
+
+function getDeepPdfBlocksForViewer(result: DeepPdfParseResult): DeepPdfBlock[] {
+  return result.sections.flatMap(tagDeepPdfSectionBlocks);
+}
+
 function getDeepPdfPageKey(sourceUrl: string, pageRange = ""): string {
   const suffix = pageRange ? `?range=${encodeURIComponent(pageRange)}` : "";
   return `${sourceUrl}#learn-panel-deep${suffix}`;
@@ -2404,6 +2520,20 @@ function getDeepPdfPageKey(sourceUrl: string, pageRange = ""): string {
 
 function getPdfSourceFromArticleUrl(url: string): string {
   return url.replace(/#learn-panel-deep(?:\?range=.*)?$/, "");
+}
+
+function getDeepPdfRangeFromArticleUrl(url: string): string {
+  const match = url.match(/#learn-panel-deep(?:\?range=([^#]+))?$/);
+  return match?.[1] ? decodeURIComponent(match[1]) : "";
+}
+
+function getDeepPdfRangeFromViewerUrl(tabUrl: string): string | null {
+  try {
+    const url = new URL(tabUrl);
+    return url.searchParams.has("deepRange") ? url.searchParams.get("deepRange") ?? "" : null;
+  } catch {
+    return null;
+  }
 }
 
 function getPdfPageFromSectionId(sectionId: string): number | null {

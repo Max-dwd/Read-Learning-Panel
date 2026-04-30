@@ -364,20 +364,31 @@ function PdfBlockOverlay({
 
   const coordinateBase = getCoordinateBase(blocks, pageSize, pageBBox);
   return (
-    <div className="pdf-block-overlay" aria-hidden="true" data-section-id={sectionId}>
+    <div className="pdf-block-overlay" data-section-id={sectionId}>
       {blocks.map((block) => {
         if (!block.bbox) {
           return null;
         }
+        const targetSectionId = block.sectionId || sectionId;
         const [x1, y1, x2, y2] = block.bbox;
         const left = ((x1 - coordinateBase.xMin) / coordinateBase.width) * 100;
         const top = ((y1 - coordinateBase.yMin) / coordinateBase.height) * 100;
         const width = ((x2 - x1) / coordinateBase.width) * 100;
         const height = ((y2 - y1) / coordinateBase.height) * 100;
         return (
-          <div
+          <button
+            aria-label="Focus parsed section"
             className="pdf-block-highlight"
-            key={block.id}
+            key={`${targetSectionId}-${block.id}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!targetSectionId) {
+                return;
+              }
+              void chrome.runtime
+                .sendMessage({ type: "LEARN_VIEWER_FOCUS_PDF_SECTION", sectionId: targetSectionId })
+                .catch(() => undefined);
+            }}
             title={block.text.slice(0, 180)}
             style={{
               left: `${clampPercent(left)}%`,
@@ -402,19 +413,44 @@ function getCoordinateBase(
   if (max <= 1) {
     return { xMin: 0, yMin: 0, width: 1, height: 1 };
   }
+
+  if (pageSize) {
+    if (pageBBox && isFullPageBBox(pageBBox, blocks, pageSize)) {
+      const [x1, y1, x2, y2] = pageBBox;
+      const width = Math.max(1, x2 - x1);
+      const height = Math.max(1, y2 - y1);
+      return { xMin: x1, yMin: y1, width, height };
+    }
+    return { xMin: 0, yMin: 0, width: pageSize.width, height: pageSize.height };
+  }
+
   if (pageBBox) {
     const [x1, y1, x2, y2] = pageBBox;
     const width = Math.max(1, x2 - x1);
     const height = Math.max(1, y2 - y1);
     return { xMin: x1, yMin: y1, width, height };
   }
-  if (pageSize) {
-    return { xMin: 0, yMin: 0, width: pageSize.width, height: pageSize.height };
-  }
 
   const maxX = Math.max(...blocks.map((block) => block.bbox?.[2] ?? 1), 1);
   const maxY = Math.max(...blocks.map((block) => block.bbox?.[3] ?? 1), 1);
   return { xMin: 0, yMin: 0, width: maxX, height: maxY };
+}
+
+function isFullPageBBox(pageBBox: PdfBoundingBox, blocks: DeepPdfBlock[], pageSize: PageSize): boolean {
+  const [x1, y1, x2, y2] = pageBBox;
+  const width = x2 - x1;
+  const height = y2 - y1;
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+
+  const maxBlockX = Math.max(...blocks.map((block) => block.bbox?.[2] ?? 0), 0);
+  const maxBlockY = Math.max(...blocks.map((block) => block.bbox?.[3] ?? 0), 0);
+  const hasPageMargin = width > maxBlockX * 1.02 || height > maxBlockY * 1.02;
+  const pageAspect = pageSize.width / Math.max(1, pageSize.height);
+  const bboxAspect = width / height;
+  const aspectDelta = Math.abs(pageAspect - bboxAspect) / Math.max(pageAspect, bboxAspect);
+  return hasPageMargin && aspectDelta < 0.08;
 }
 
 function clampPercent(value: number): number {
