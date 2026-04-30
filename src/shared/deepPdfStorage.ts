@@ -1,3 +1,4 @@
+import { DEEP_PDF_GEOMETRY_VERSION } from "./types";
 import type { DeepPdfBlock, DeepPdfParseResult } from "./types";
 
 const DEEP_PDF_PARSE_STORAGE_PREFIX = "learnPanelDeepPdfParse_";
@@ -12,7 +13,12 @@ export async function loadSavedDeepPdfParse(sourceUrl: string, pageRange: string
   const key = getDeepPdfParseStorageKey(sourceUrl, pageRange);
   const stored = await chrome.storage.local.get(key);
   const result = stored[key] as DeepPdfParseResult | undefined;
-  return result && Array.isArray(result.sections) && Array.isArray(result.blocks) ? result : null;
+  return result &&
+    result.geometryVersion === DEEP_PDF_GEOMETRY_VERSION &&
+    Array.isArray(result.sections) &&
+    Array.isArray(result.blocks)
+    ? result
+    : null;
 }
 
 export async function saveDeepPdfBoundingBoxesVisible(sourceUrl: string, pageRange: string, visible: boolean): Promise<void> {

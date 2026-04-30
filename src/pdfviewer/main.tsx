@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { PDFDocumentProxy } from "pdfjs-dist/types/src/display/api";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
-import type { ContentRequest, ContentResponse, DeepPdfBlock, PdfBoundingBox } from "../shared/types";
+import type { ContentRequest, ContentResponse, DeepPdfBlock, PdfBoundingBox, PdfPolygon } from "../shared/types";
 import "./styles.css";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
@@ -370,11 +370,7 @@ function PdfBlockOverlay({
           return null;
         }
         const targetSectionId = block.sectionId || sectionId;
-        const [x1, y1, x2, y2] = block.bbox;
-        const left = ((x1 - coordinateBase.xMin) / coordinateBase.width) * 100;
-        const top = ((y1 - coordinateBase.yMin) / coordinateBase.height) * 100;
-        const width = ((x2 - x1) / coordinateBase.width) * 100;
-        const height = ((y2 - y1) / coordinateBase.height) * 100;
+        const geometry = getBlockGeometry(block, coordinateBase);
         return (
           <button
             aria-label="Focus parsed section"
@@ -391,10 +387,11 @@ function PdfBlockOverlay({
             }}
             title={block.text.slice(0, 180)}
             style={{
-              left: `${clampPercent(left)}%`,
-              top: `${clampPercent(top)}%`,
-              width: `${clampPercent(width)}%`,
-              height: `${clampPercent(height)}%`
+              clipPath: geometry.clipPath,
+              left: `${clampPercent(geometry.left)}%`,
+              top: `${clampPercent(geometry.top)}%`,
+              width: `${clampPercent(geometry.width)}%`,
+              height: `${clampPercent(geometry.height)}%`
             }}
           />
         );
@@ -408,7 +405,10 @@ function getCoordinateBase(
   pageSize: PageSize | undefined,
   pageBBox: PdfBoundingBox | undefined
 ): CoordinateBase {
-  const values = blocks.flatMap((block) => block.bbox ?? []);
+  const values = blocks.flatMap((block) => [
+    ...(block.bbox ?? []),
+    ...(block.polygon?.flatMap((point) => point) ?? [])
+  ]);
   const max = Math.max(...values, 1);
   if (max <= 1) {
     // Normalized [0,1] coordinates
@@ -436,6 +436,47 @@ function getCoordinateBase(
   const maxX = Math.max(...blocks.map((block) => block.bbox?.[2] ?? 1), 1);
   const maxY = Math.max(...blocks.map((block) => block.bbox?.[3] ?? 1), 1);
   return { xMin: 0, yMin: 0, width: maxX, height: maxY };
+}
+
+function getBlockGeometry(block: DeepPdfBlock, coordinateBase: CoordinateBase) {
+  const polygon = block.polygon?.length ? block.polygon : null;
+  const bbox = polygonToBbox(polygon) ?? block.bbox;
+  if (!bbox) {
+    return { left: 0, top: 0, width: 0, height: 0, clipPath: undefined };
+  }
+
+  const [x1, y1, x2, y2] = bbox;
+  const left = ((x1 - coordinateBase.xMin) / coordinateBase.width) * 100;
+  const top = ((y1 - coordinateBase.yMin) / coordinateBase.height) * 100;
+  const width = ((x2 - x1) / coordinateBase.width) * 100;
+  const height = ((y2 - y1) / coordinateBase.height) * 100;
+
+  if (!polygon || width <= 0 || height <= 0) {
+    return { left, top, width, height, clipPath: undefined };
+  }
+
+  const points = polygon.map(([x, y]) => {
+    const pointX = (((x - coordinateBase.xMin) / coordinateBase.width) * 100 - left) / width * 100;
+    const pointY = (((y - coordinateBase.yMin) / coordinateBase.height) * 100 - top) / height * 100;
+    return `${clampPercent(pointX)}% ${clampPercent(pointY)}%`;
+  });
+
+  return {
+    left,
+    top,
+    width,
+    height,
+    clipPath: `polygon(${points.join(", ")})`
+  };
+}
+
+function polygonToBbox(polygon: PdfPolygon | null): PdfBoundingBox | undefined {
+  if (!polygon || polygon.length === 0) {
+    return undefined;
+  }
+  const xs = polygon.map((point) => point[0]);
+  const ys = polygon.map((point) => point[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
 }
 
 function clampPercent(value: number): number {

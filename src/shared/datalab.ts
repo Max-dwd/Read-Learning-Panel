@@ -1,4 +1,5 @@
-import type { DeepPdfBlock, DeepPdfParseResult, DeepPdfSection, PdfBoundingBox, Settings } from "./types";
+import { DEEP_PDF_GEOMETRY_VERSION } from "./types";
+import type { DeepPdfBlock, DeepPdfParseResult, DeepPdfSection, PdfBoundingBox, PdfPolygon, Settings } from "./types";
 import type { LoadedPdfDocument } from "./pdf";
 
 type DatalabSubmitResponse = {
@@ -37,6 +38,11 @@ type RawDatalabBlock = {
   children?: unknown;
 };
 
+type RawDatalabBlockWithPage = {
+  block: RawDatalabBlock;
+  page: number | null;
+};
+
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 90;
 
@@ -65,7 +71,7 @@ export async function parsePdfWithDatalab(
   const formData = new FormData();
   formData.append("file", pdfBlob, safePdfFilename(pdfDocument.title));
   formData.append("mode", settings.deepPdfParserMode || "balanced");
-  formData.append("output_format", "chunks,json");
+  formData.append("output_format", "json");
   if (pageRange) {
     formData.append("page_range", pageRange);
   }
@@ -102,6 +108,7 @@ export async function parsePdfWithDatalab(
     title: pdfDocument.title,
     pageCount: result.page_count || pdfDocument.pageCount,
     pageRange,
+    geometryVersion: DEEP_PDF_GEOMETRY_VERSION,
     parseQualityScore: typeof result.parse_quality_score === "number" ? result.parse_quality_score : undefined,
     markdown: typeof result.markdown === "string" ? result.markdown : undefined,
     pageBboxes,
@@ -160,7 +167,7 @@ function buildCheckUrl(endpoint: string, submitBody: DatalabSubmitResponse | nul
     return new URL(submitBody.request_check_url, endpoint).toString();
   }
   if (submitBody?.request_id) {
-    return new URL(`/api/v1/convert/${submitBody.request_id}`, endpoint).toString();
+    return new URL(`/api/v1/marker/${submitBody.request_id}`, endpoint).toString();
   }
   throw new Error("Datalab response did not include a result check URL.");
 }
@@ -168,54 +175,27 @@ function buildCheckUrl(endpoint: string, submitBody: DatalabSubmitResponse | nul
 function extractBlocks(result: DatalabPollResponse, pageCount: number): DeepPdfBlock[] {
   const rawBlocks = collectRawBlocks(result);
   return rawBlocks
-    .map((block, index) => normalizeBlock(block, index, true, pageCount))
+    .map(({ block, page }, index) => normalizeBlock(block, index, page, pageCount))
     .filter((block): block is DeepPdfBlock => Boolean(block));
 }
 
-function collectRawBlocks(result: DatalabPollResponse): RawDatalabBlock[] {
-  const candidates = [result.chunks, result.json];
-  for (const candidate of candidates) {
-    const blocks = readBlocks(candidate);
-    if (blocks.length > 0) {
-      return blocks;
-    }
-  }
-  return [];
-}
-
-function readBlocks(value: unknown): RawDatalabBlock[] {
-  if (Array.isArray(value)) {
-    return value.filter(isObject) as RawDatalabBlock[];
-  }
-  if (!isObject(value)) {
-    return [];
+function collectRawBlocks(result: DatalabPollResponse): RawDatalabBlockWithPage[] {
+  const jsonBlocks = collectJsonBlocks(result.json);
+  if (jsonBlocks.length > 0) {
+    return jsonBlocks;
   }
 
-  const direct = (value as { blocks?: unknown }).blocks;
-  if (Array.isArray(direct)) {
-    return direct.filter(isObject) as RawDatalabBlock[];
-  }
-
-  const pages = (value as { pages?: unknown }).pages;
-  if (Array.isArray(pages)) {
-    return pages.flatMap((page) => {
-      if (!isObject(page)) return [];
-      const pageBlocks = (page as { blocks?: unknown; children?: unknown }).blocks ?? (page as { children?: unknown }).children;
-      return Array.isArray(pageBlocks) ? pageBlocks.filter(isObject) as RawDatalabBlock[] : [];
-    });
-  }
-
-  return [];
+  return collectFlatBlocks(result.chunks).concat(collectFlatBlocks(result.json));
 }
 
 function normalizeBlock(
   block: RawDatalabBlock,
   index: number,
-  hasZeroBasedPages: boolean,
+  pageContext: number | null,
   pageCount: number
 ): DeepPdfBlock | null {
   const rawPage = readPage(block);
-  const page = normalizePage(rawPage, hasZeroBasedPages, pageCount);
+  const page = normalizePage(rawPage, true, pageCount) ?? pageContext;
   if (!page) {
     return null;
   }
@@ -226,13 +206,15 @@ function normalizeBlock(
     return null;
   }
 
+  const polygon = readPolygon(block.polygon);
   return {
     id: readString(block.id) || readString(block.block_id) || `block-${index + 1}`,
     page,
     type: readString(block.block_type) || readString(block.type) || "Text",
     text: text.trim(),
     html: html || undefined,
-    bbox: readBbox(block.bbox) ?? readPolygonBbox(block.polygon)
+    bbox: readBbox(block.bbox) ?? polygonToBbox(polygon),
+    polygon
   };
 }
 
@@ -241,9 +223,8 @@ function extractPageBboxes(result: DatalabPollResponse, _blocks: DeepPdfBlock[])
   const pageObjects = readPageObjects(result.json);
 
   for (const pageObject of pageObjects) {
-    const rawPage = readPage(pageObject);
-    const page = normalizePage(rawPage, true, Number.MAX_SAFE_INTEGER);
-    const bbox = readBbox(pageObject.bbox) ?? readPolygonBbox(pageObject.polygon);
+    const page = pageObject.page;
+    const bbox = readBbox(pageObject.block.bbox) ?? polygonToBbox(readPolygon(pageObject.block.polygon));
     if (page && bbox) {
       bboxes[page] = bbox;
     }
@@ -252,12 +233,95 @@ function extractPageBboxes(result: DatalabPollResponse, _blocks: DeepPdfBlock[])
   return bboxes;
 }
 
-function readPageObjects(value: unknown): RawDatalabBlock[] {
+function collectJsonBlocks(value: unknown): RawDatalabBlockWithPage[] {
+  return readPageObjects(value).flatMap(({ block, page }) =>
+    readChildren(block).flatMap((child) => flattenJsonBlock(child, page))
+  );
+}
+
+function flattenJsonBlock(block: RawDatalabBlock, inheritedPage: number | null): RawDatalabBlockWithPage[] {
+  const page = normalizePage(readPage(block), true, Number.MAX_SAFE_INTEGER) ?? inheritedPage;
+  const children = readChildren(block);
+  const self = isPageBlock(block) ? [] : [{ block, page }];
+  return self.concat(children.flatMap((child) => flattenJsonBlock(child, page)));
+}
+
+function collectFlatBlocks(value: unknown): RawDatalabBlockWithPage[] {
+  return readFlatBlocks(value).map((block) => ({
+    block,
+    page: normalizePage(readPage(block), true, Number.MAX_SAFE_INTEGER)
+  }));
+}
+
+function readFlatBlocks(value: unknown): RawDatalabBlock[] {
+  const parsed = parseMaybeJson(value);
+  if (Array.isArray(parsed)) {
+    return parsed.filter(isObject) as RawDatalabBlock[];
+  }
+  if (!isObject(parsed)) {
+    return [];
+  }
+
+  const direct = (parsed as { blocks?: unknown }).blocks;
+  if (Array.isArray(direct)) {
+    return direct.filter(isObject) as RawDatalabBlock[];
+  }
+
+  const chunks = (parsed as { chunks?: unknown }).chunks;
+  if (Array.isArray(chunks)) {
+    return chunks.filter(isObject) as RawDatalabBlock[];
+  }
+
+  return [];
+}
+
+function readPageObjects(value: unknown): RawDatalabBlockWithPage[] {
+  const parsed = parseMaybeJson(value);
+  const candidates = collectPageCandidates(parsed);
+
+  return candidates.map((block, index) => ({
+    block,
+    page: normalizePage(readPage(block), true, Number.MAX_SAFE_INTEGER) ?? index + 1
+  }));
+}
+
+function collectPageCandidates(value: unknown): RawDatalabBlock[] {
+  if (Array.isArray(value)) {
+    return value.filter(isObject) as RawDatalabBlock[];
+  }
   if (!isObject(value)) {
     return [];
   }
+
+  if (isPageBlock(value as RawDatalabBlock)) {
+    return [value as RawDatalabBlock];
+  }
+
   const pages = (value as { pages?: unknown }).pages;
-  return Array.isArray(pages) ? pages.filter(isObject) as RawDatalabBlock[] : [];
+  if (Array.isArray(pages)) {
+    return pages.filter(isObject) as RawDatalabBlock[];
+  }
+
+  const children = (value as { children?: unknown }).children;
+  if (Array.isArray(children)) {
+    const childPages = children.filter((child): child is RawDatalabBlock => isObject(child) && isPageBlock(child as RawDatalabBlock));
+    if (childPages.length > 0) {
+      return childPages;
+    }
+  }
+
+  return [];
+}
+
+function readChildren(block: RawDatalabBlock): RawDatalabBlock[] {
+  const children = block.children;
+  return Array.isArray(children) ? children.filter(isObject) as RawDatalabBlock[] : [];
+}
+
+function isPageBlock(block: RawDatalabBlock): boolean {
+  const type = readString(block.block_type) || readString(block.type);
+  const id = readString(block.id) || readString(block.block_id);
+  return /^page$/i.test(type) || /\/page\/\d+\/page\//i.test(id);
 }
 
 function buildSectionsFromBlocks(blocks: DeepPdfBlock[], pdfDocument: LoadedPdfDocument): DeepPdfSection[] {
@@ -347,7 +411,13 @@ function inferHeadingLevel(block: DeepPdfBlock): 2 | 3 {
 function readPage(block: RawDatalabBlock): number | null {
   const rawPage = block.page ?? block.page_id;
   const page = typeof rawPage === "number" ? rawPage : typeof rawPage === "string" ? Number(rawPage) : null;
-  return Number.isInteger(page) ? page : null;
+  if (Number.isInteger(page)) {
+    return page;
+  }
+
+  const id = readString(block.id) || readString(block.block_id);
+  const match = id.match(/\/page\/(\d+)(?:\/|$)/i);
+  return match ? Number(match[1]) : null;
 }
 
 function normalizePage(page: number | null, hasZeroBasedPages: boolean, pageCount: number): number | null {
@@ -366,7 +436,7 @@ function readBbox(value: unknown): PdfBoundingBox | undefined {
   return numbers.every((item) => Number.isFinite(item)) ? numbers as PdfBoundingBox : undefined;
 }
 
-function readPolygonBbox(value: unknown): PdfBoundingBox | undefined {
+function readPolygon(value: unknown): PdfPolygon | undefined {
   if (!Array.isArray(value) || value.length === 0) {
     return undefined;
   }
@@ -380,9 +450,28 @@ function readPolygonBbox(value: unknown): PdfBoundingBox | undefined {
     return undefined;
   }
 
-  const xs = points.map((point) => point[0]);
-  const ys = points.map((point) => point[1]);
+  return points;
+}
+
+function polygonToBbox(polygon: PdfPolygon | undefined): PdfBoundingBox | undefined {
+  if (!polygon || polygon.length === 0) {
+    return undefined;
+  }
+
+  const xs = polygon.map((point) => point[0]);
+  const ys = polygon.map((point) => point[1]);
   return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
 }
 
 function readString(value: unknown): string {

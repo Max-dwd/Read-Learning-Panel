@@ -2,6 +2,8 @@ export type OutputLanguage = "follow-page" | "zh" | "en";
 export type PdfAnalysisMode = "visual" | "deep";
 export type DatalabParseMode = "fast" | "balanced" | "accurate";
 
+export const DEEP_PDF_GEOMETRY_VERSION = 2;
+
 export type ProviderConfig = {
   endpoint: string;
   model: string;
@@ -77,7 +79,9 @@ export type PdfGuideResult = {
   pages: PdfPageGuide[];
 };
 
+export type PdfPoint = [number, number];
 export type PdfBoundingBox = [number, number, number, number];
+export type PdfPolygon = PdfPoint[];
 
 export type DeepPdfBlock = {
   id: string;
@@ -87,6 +91,7 @@ export type DeepPdfBlock = {
   text: string;
   html?: string;
   bbox?: PdfBoundingBox;
+  polygon?: PdfPolygon;
 };
 
 export type DeepPdfSection = {
@@ -104,6 +109,7 @@ export type DeepPdfParseResult = {
   title: string;
   pageCount: number;
   pageRange: string;
+  geometryVersion?: number;
   parseQualityScore?: number;
   markdown?: string;
   pageBboxes?: Record<number, PdfBoundingBox>;
