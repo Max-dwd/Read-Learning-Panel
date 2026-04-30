@@ -33,6 +33,13 @@ import {
 } from "../shared/model";
 import { parsePdfWithDatalab } from "../shared/datalab";
 import {
+  getDeepPdfBlocksForViewer,
+  loadSavedDeepPdfBoundingBoxesVisible,
+  loadSavedDeepPdfParse,
+  saveDeepPdfBoundingBoxesVisible,
+  saveDeepPdfParse
+} from "../shared/deepPdfStorage";
+import {
   getPdfSourceUrl,
   getPdfTargetPageFromUrl,
   loadPdfDocument,
@@ -60,7 +67,6 @@ import "katex/dist/katex.min.css";
 import "./styles.css";
 
 const PDF_GUIDE_STORAGE_PREFIX = "learnPanelPdfGuide_";
-const DEEP_PDF_PARSE_STORAGE_PREFIX = "learnPanelDeepPdfParse_";
 
 async function savePdfGuide(sourceUrl: string, guide: PdfGuideResult): Promise<void> {
   const key = PDF_GUIDE_STORAGE_PREFIX + sourceUrl;
@@ -72,22 +78,6 @@ async function loadSavedPdfGuide(sourceUrl: string): Promise<PdfGuideResult | nu
   const stored = await chrome.storage.local.get(key);
   const guide = stored[key];
   return guide && Array.isArray(guide.pages) ? guide : null;
-}
-
-async function saveDeepPdfParse(sourceUrl: string, pageRange: string, result: DeepPdfParseResult): Promise<void> {
-  const key = getDeepPdfParseStorageKey(sourceUrl, pageRange);
-  await chrome.storage.local.set({ [key]: result });
-}
-
-async function loadSavedDeepPdfParse(sourceUrl: string, pageRange: string): Promise<DeepPdfParseResult | null> {
-  const key = getDeepPdfParseStorageKey(sourceUrl, pageRange);
-  const stored = await chrome.storage.local.get(key);
-  const result = stored[key] as DeepPdfParseResult | undefined;
-  return result && Array.isArray(result.sections) && Array.isArray(result.blocks) ? result : null;
-}
-
-function getDeepPdfParseStorageKey(sourceUrl: string, pageRange: string): string {
-  return `${DEEP_PDF_PARSE_STORAGE_PREFIX}${sourceUrl}::${pageRange || "all"}`;
 }
 
 type LoadState = "idle" | "loading" | "ready" | "error";
@@ -539,6 +529,9 @@ function App() {
     if (!force && currentPdf?.url === tabUrl) {
       setPdfDocument(currentPdf);
       setLoadState("ready");
+      if (showAllDeepPdfBoundingBoxes && deepPdfParse) {
+        void showDeepPdfBoundingBoxesInViewer(deepPdfParse).catch(() => undefined);
+      }
       return;
     }
 
@@ -1104,6 +1097,7 @@ function App() {
 
   async function applyDeepPdfParse(result: DeepPdfParseResult, options: { restoreSaved?: boolean } = {}) {
     setPdfAnalysisMode("deep");
+    void restoreDeepPdfBoundingBoxesVisibility(result).catch(() => undefined);
     const articleFromParse = buildDeepPdfArticle(result);
     const pageKey = getDeepPdfPageKey(result.sourceUrl, result.pageRange);
 
@@ -1139,6 +1133,27 @@ function App() {
     applyPage(articleFromParse, null, pageKey);
   }
 
+  async function restoreDeepPdfBoundingBoxesVisibility(result: DeepPdfParseResult) {
+    const visible = await loadSavedDeepPdfBoundingBoxesVisible(result.sourceUrl, result.pageRange);
+    setShowAllDeepPdfBoundingBoxes(visible);
+
+    if (visible) {
+      await showDeepPdfBoundingBoxesInViewer(result);
+      return;
+    }
+
+    await sendToViewer({ type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS", sectionId: "", blocks: [] }).catch(() => undefined);
+  }
+
+  async function showDeepPdfBoundingBoxesInViewer(result: DeepPdfParseResult) {
+    await sendToViewer({
+      type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS",
+      sectionId: activeDeepPdfSectionId ?? "",
+      blocks: getDeepPdfBlocksForViewer(result),
+      pageBboxes: result.pageBboxes
+    });
+  }
+
   function focusDeepPdfSection(section: DeepPdfSection) {
     setActiveDeepPdfSectionId(section.id);
     void sendToViewer({
@@ -1155,16 +1170,15 @@ function App() {
     const nextVisible = !showAllDeepPdfBoundingBoxes;
     setShowAllDeepPdfBoundingBoxes(nextVisible);
     if (!nextVisible || !deepPdfParse) {
+      if (deepPdfParse) {
+        void saveDeepPdfBoundingBoxesVisible(deepPdfParse.sourceUrl, deepPdfParse.pageRange, false).catch(() => undefined);
+      }
       void sendToViewer({ type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS", sectionId: "", blocks: [] }).catch(() => undefined);
       return;
     }
 
-    void sendToViewer({
-      type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS",
-      sectionId: activeDeepPdfSectionId ?? "",
-      blocks: getDeepPdfBlocksForViewer(deepPdfParse),
-      pageBboxes: deepPdfParse.pageBboxes
-    }).catch(() => undefined);
+    void saveDeepPdfBoundingBoxesVisible(deepPdfParse.sourceUrl, deepPdfParse.pageRange, true).catch(() => undefined);
+    void showDeepPdfBoundingBoxesInViewer(deepPdfParse).catch(() => undefined);
   }
 
   async function getPdfImagesForPages(loadedPdf: LoadedPdfDocument, pages: number[]): Promise<PdfPageImage[]> {
@@ -2783,10 +2797,6 @@ function tagDeepPdfSectionBlocks(section: DeepPdfSection): DeepPdfBlock[] {
     ...block,
     sectionId: section.id
   }));
-}
-
-function getDeepPdfBlocksForViewer(result: DeepPdfParseResult): DeepPdfBlock[] {
-  return result.sections.flatMap(tagDeepPdfSectionBlocks);
 }
 
 function getDeepPdfPageKey(sourceUrl: string, pageRange = ""): string {
