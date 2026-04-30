@@ -3,12 +3,14 @@ import { createRoot } from "react-dom/client";
 import type { PDFDocumentProxy } from "pdfjs-dist/types/src/display/api";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
-import type { ContentRequest, ContentResponse } from "../shared/types";
+import type { ContentRequest, ContentResponse, DeepPdfBlock, PdfBoundingBox } from "../shared/types";
 import "./styles.css";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
 
 type ViewerState = "landing" | "loading" | "ready" | "error";
+type PageSize = { width: number; height: number };
+type CoordinateBase = { xMin: number; yMin: number; width: number; height: number };
 
 function getSourceFromUrl(): string | null {
   const params = new URLSearchParams(location.search);
@@ -22,6 +24,10 @@ function App() {
   const [pageCount, setPageCount] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageInputValue, setPageInputValue] = useState("1");
+  const [highlightedBlocks, setHighlightedBlocks] = useState<DeepPdfBlock[]>([]);
+  const [highlightedSectionId, setHighlightedSectionId] = useState("");
+  const [highlightedPageBboxes, setHighlightedPageBboxes] = useState<Record<number, PdfBoundingBox>>({});
+  const [pageSizes, setPageSizes] = useState<Record<number, PageSize>>({});
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -50,6 +56,7 @@ function App() {
       pageCountRef.current = pdf.numPages;
       setCurrentPage(1);
       setPageInputValue("1");
+      setPageSizes({});
       setState("ready");
 
       // Render pages after state update
@@ -110,6 +117,18 @@ function App() {
 
       if (request.type === "LEARN_PANEL_SCROLL_TO_PDF_PAGE") {
         scrollToPageRef.current(request.page);
+        sendResponse({ ok: true });
+        return false;
+      }
+
+      if (request.type === "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS") {
+        setHighlightedSectionId(request.sectionId);
+        setHighlightedBlocks(request.blocks.filter((block) => block.bbox));
+        setHighlightedPageBboxes(request.pageBboxes ?? {});
+        const firstPage = request.blocks.find((block) => block.bbox)?.page;
+        if (firstPage) {
+          scrollToPageRef.current(firstPage);
+        }
         sendResponse({ ok: true });
         return false;
       }
@@ -183,6 +202,7 @@ function App() {
 
         const scale = 2;
         const viewport = page.getViewport({ scale });
+        const baseViewport = page.getViewport({ scale: 1 });
         const canvas = document.createElement("canvas");
         const ctx = canvas.getContext("2d");
         if (!ctx) continue;
@@ -193,6 +213,10 @@ function App() {
         if (version !== renderingRef.current) return;
 
         wrapper.appendChild(canvas);
+        setPageSizes((sizes) => ({
+          ...sizes,
+          [i]: { width: baseViewport.width, height: baseViewport.height }
+        }));
       } catch {
         // Skip failed pages
       }
@@ -309,12 +333,92 @@ function App() {
               }}
             >
               <span className="page-number-label">{page}</span>
+              <PdfBlockOverlay
+                blocks={highlightedBlocks.filter((block) => block.page === page)}
+                sectionId={highlightedSectionId}
+                pageSize={pageSizes[page]}
+                pageBBox={highlightedPageBboxes[page]}
+              />
             </div>
           ))}
         </div>
       </div>
     </div>
   );
+}
+
+function PdfBlockOverlay({
+  blocks,
+  sectionId,
+  pageSize,
+  pageBBox
+}: {
+  blocks: DeepPdfBlock[];
+  sectionId: string;
+  pageSize: PageSize | undefined;
+  pageBBox: PdfBoundingBox | undefined;
+}) {
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  const coordinateBase = getCoordinateBase(blocks, pageSize, pageBBox);
+  return (
+    <div className="pdf-block-overlay" aria-hidden="true" data-section-id={sectionId}>
+      {blocks.map((block) => {
+        if (!block.bbox) {
+          return null;
+        }
+        const [x1, y1, x2, y2] = block.bbox;
+        const left = ((x1 - coordinateBase.xMin) / coordinateBase.width) * 100;
+        const top = ((y1 - coordinateBase.yMin) / coordinateBase.height) * 100;
+        const width = ((x2 - x1) / coordinateBase.width) * 100;
+        const height = ((y2 - y1) / coordinateBase.height) * 100;
+        return (
+          <div
+            className="pdf-block-highlight"
+            key={block.id}
+            title={block.text.slice(0, 180)}
+            style={{
+              left: `${clampPercent(left)}%`,
+              top: `${clampPercent(top)}%`,
+              width: `${clampPercent(width)}%`,
+              height: `${clampPercent(height)}%`
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function getCoordinateBase(
+  blocks: DeepPdfBlock[],
+  pageSize: PageSize | undefined,
+  pageBBox: PdfBoundingBox | undefined
+): CoordinateBase {
+  const values = blocks.flatMap((block) => block.bbox ?? []);
+  const max = Math.max(...values, 1);
+  if (max <= 1) {
+    return { xMin: 0, yMin: 0, width: 1, height: 1 };
+  }
+  if (pageBBox) {
+    const [x1, y1, x2, y2] = pageBBox;
+    const width = Math.max(1, x2 - x1);
+    const height = Math.max(1, y2 - y1);
+    return { xMin: x1, yMin: y1, width, height };
+  }
+  if (pageSize) {
+    return { xMin: 0, yMin: 0, width: pageSize.width, height: pageSize.height };
+  }
+
+  const maxX = Math.max(...blocks.map((block) => block.bbox?.[2] ?? 1), 1);
+  const maxY = Math.max(...blocks.map((block) => block.bbox?.[3] ?? 1), 1);
+  return { xMin: 0, yMin: 0, width: maxX, height: maxY };
+}
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
 }
 
 function getPdfTitle(source: string): string {

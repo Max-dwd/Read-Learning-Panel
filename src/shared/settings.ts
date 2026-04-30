@@ -37,6 +37,23 @@ export const DEFAULT_SETTINGS: Settings = {
   ),
   pdfEndpoint: PROVIDER_PRESETS[0].endpoint,
   pdfModel: PROVIDER_PRESETS[0].model,
+  deepPdfParserEndpoint: "https://www.datalab.to/api/v1/convert",
+  deepPdfParserApiKey: "",
+  deepPdfParserMode: "balanced",
+  deepPdfSummaryProviderId: PROVIDER_PRESETS[0].id,
+  deepPdfSummaryApiKeys: {},
+  deepPdfSummaryProviderConfigs: Object.fromEntries(
+    PROVIDER_PRESETS.map((preset) => [preset.id, { endpoint: preset.endpoint, model: preset.model }])
+  ),
+  deepPdfSummaryEndpoint: PROVIDER_PRESETS[0].endpoint,
+  deepPdfSummaryModel: PROVIDER_PRESETS[0].model,
+  deepPdfVisionProviderId: "custom",
+  deepPdfVisionApiKeys: {},
+  deepPdfVisionProviderConfigs: {
+    custom: { endpoint: "", model: "" }
+  },
+  deepPdfVisionEndpoint: "",
+  deepPdfVisionModel: "",
   outputLanguage: "follow-page"
 };
 
@@ -57,6 +74,12 @@ export async function loadSettings(): Promise<Settings> {
   const providerId = storedSettings.providerId ?? detectedPreset?.id ?? "custom";
   const detectedPdfPreset = PROVIDER_PRESETS.find((preset) => preset.endpoint === merged.pdfEndpoint);
   const pdfProviderId = storedSettings.pdfProviderId ?? detectedPdfPreset?.id ?? "custom";
+  const detectedDeepPdfSummaryPreset = PROVIDER_PRESETS.find((preset) => preset.endpoint === merged.deepPdfSummaryEndpoint);
+  const deepPdfSummaryProviderId =
+    storedSettings.deepPdfSummaryProviderId ?? detectedDeepPdfSummaryPreset?.id ?? "custom";
+  const detectedDeepPdfVisionPreset = PROVIDER_PRESETS.find((preset) => preset.endpoint === merged.deepPdfVisionEndpoint);
+  const deepPdfVisionProviderId =
+    storedSettings.deepPdfVisionProviderId ?? detectedDeepPdfVisionPreset?.id ?? "custom";
   const apiKeys = {
     ...DEFAULT_SETTINGS.apiKeys,
     ...(storedSettings.apiKeys ?? {})
@@ -65,6 +88,14 @@ export async function loadSettings(): Promise<Settings> {
     ...DEFAULT_SETTINGS.pdfApiKeys,
     ...(storedSettings.pdfApiKeys ?? {})
   };
+  const deepPdfSummaryApiKeys = {
+    ...DEFAULT_SETTINGS.deepPdfSummaryApiKeys,
+    ...(storedSettings.deepPdfSummaryApiKeys ?? {})
+  };
+  const deepPdfVisionApiKeys = {
+    ...DEFAULT_SETTINGS.deepPdfVisionApiKeys,
+    ...(storedSettings.deepPdfVisionApiKeys ?? {})
+  };
   const providerConfigs = {
     ...DEFAULT_SETTINGS.providerConfigs,
     ...(storedSettings.providerConfigs ?? {})
@@ -72,6 +103,14 @@ export async function loadSettings(): Promise<Settings> {
   const pdfProviderConfigs = {
     ...DEFAULT_SETTINGS.pdfProviderConfigs,
     ...(storedSettings.pdfProviderConfigs ?? {})
+  };
+  const deepPdfSummaryProviderConfigs = {
+    ...DEFAULT_SETTINGS.deepPdfSummaryProviderConfigs,
+    ...(storedSettings.deepPdfSummaryProviderConfigs ?? {})
+  };
+  const deepPdfVisionProviderConfigs = {
+    ...DEFAULT_SETTINGS.deepPdfVisionProviderConfigs,
+    ...(storedSettings.deepPdfVisionProviderConfigs ?? {})
   };
 
   providerConfigs[providerId] = {
@@ -82,6 +121,14 @@ export async function loadSettings(): Promise<Settings> {
     endpoint: merged.pdfEndpoint,
     model: merged.pdfModel
   };
+  deepPdfSummaryProviderConfigs[deepPdfSummaryProviderId] = {
+    endpoint: merged.deepPdfSummaryEndpoint,
+    model: merged.deepPdfSummaryModel
+  };
+  deepPdfVisionProviderConfigs[deepPdfVisionProviderId] = {
+    endpoint: merged.deepPdfVisionEndpoint,
+    model: merged.deepPdfVisionModel
+  };
 
   if (storedSettings.apiKey?.trim() && !apiKeys[providerId]) {
     apiKeys[providerId] = storedSettings.apiKey.trim();
@@ -91,10 +138,16 @@ export async function loadSettings(): Promise<Settings> {
     ...merged,
     providerId,
     pdfProviderId,
+    deepPdfSummaryProviderId,
+    deepPdfVisionProviderId,
     apiKeys,
     pdfApiKeys,
+    deepPdfSummaryApiKeys,
+    deepPdfVisionApiKeys,
     providerConfigs,
-    pdfProviderConfigs
+    pdfProviderConfigs,
+    deepPdfSummaryProviderConfigs,
+    deepPdfVisionProviderConfigs
   };
 }
 
@@ -108,4 +161,12 @@ export function getActiveApiKey(settings: Settings): string {
 
 export function getActivePdfApiKey(settings: Settings): string {
   return settings.pdfApiKeys[settings.pdfProviderId]?.trim() ?? "";
+}
+
+export function getActiveDeepPdfSummaryApiKey(settings: Settings): string {
+  return settings.deepPdfSummaryApiKeys[settings.deepPdfSummaryProviderId]?.trim() ?? "";
+}
+
+export function getActiveDeepPdfVisionApiKey(settings: Settings): string {
+  return settings.deepPdfVisionApiKeys[settings.deepPdfVisionProviderId]?.trim() ?? "";
 }

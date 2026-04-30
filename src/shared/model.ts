@@ -8,7 +8,7 @@ import type {
   SectionFollowUp,
   Settings
 } from "./types";
-import { getActiveApiKey, getActivePdfApiKey } from "./settings";
+import { getActiveApiKey, getActiveDeepPdfSummaryApiKey, getActivePdfApiKey } from "./settings";
 import type { PdfPageImage } from "./pdf";
 
 const MAX_TOTAL_CHARS = 42000;
@@ -261,6 +261,60 @@ export async function analyzePdfProgressively({
     };
     error.raw = raw;
     throw error;
+  }
+  if (!response.body) {
+    throw new Error("Model response did not include a readable stream.");
+  }
+
+  return readProgressiveAnalysisStream(response.body, article.sections, onProgress);
+}
+
+export async function analyzeDeepPdfProgressively(
+  article: ExtractedArticle,
+  settings: Settings,
+  onProgress: (event: AnalysisProgressEvent) => void
+): Promise<AnalysisResult> {
+  const apiKey = getActiveDeepPdfSummaryApiKey(settings);
+  if (!apiKey) {
+    throw new Error("Missing deep PDF summary API key. Open settings and add the PDF deep analysis summary API key.");
+  }
+
+  const endpoint = settings.deepPdfSummaryEndpoint.trim();
+  const model = settings.deepPdfSummaryModel.trim();
+  if (!endpoint) {
+    throw new Error("Missing deep PDF summary endpoint. Open settings and add the PDF deep analysis summary endpoint.");
+  }
+  if (!model) {
+    throw new Error("Missing deep PDF summary model. Open settings and add the PDF deep analysis summary model.");
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      stream: true,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a rigorous reading and learning assistant. Return only newline-delimited JSON objects. Do not wrap the output in markdown."
+        },
+        {
+          role: "user",
+          content: buildDeepPdfProgressivePrompt(article, settings.outputLanguage)
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as OpenAIResponse | null;
+    throw new Error(body?.error?.message ?? `Model request failed with HTTP ${response.status}`);
   }
   if (!response.body) {
     throw new Error("Model response did not include a readable stream.");
@@ -769,6 +823,19 @@ function buildPdfProgressivePrompt(article: ExtractedArticle, pages: number[], o
     "Treat each PDF page as one article section. Use the page screenshot as the source of truth for that section.",
     "For section.role_in_article, explain how this page changes or advances the PDF by referencing all pages when useful.",
     "If a page is mostly cover, references, agenda, or blank space, still analyze its actual role instead of skipping it."
+  ].join("\n");
+}
+
+function buildDeepPdfProgressivePrompt(article: ExtractedArticle, outputLanguage: OutputLanguage): string {
+  const basePrompt = buildProgressivePrompt(article, outputLanguage);
+  return [
+    basePrompt,
+    "",
+    "PDF deep-analysis input rules:",
+    "This PDF was parsed into structured blocks by Datalab Marker. Section text includes page markers and block types such as heading, text, table, figure, or equation.",
+    "Use the parsed text as the source of truth. When a section contains tables, figures, equations, or captions, explain their learning value instead of only restating nearby text.",
+    "For section.interpretation, be more detailed than a page-level visual scan: connect the section's claims, definitions, evidence, and figures into concrete learning takeaways.",
+    "For section.role_in_article, explain how this parsed section advances the PDF document as a whole."
   ].join("\n");
 }
 

@@ -1,7 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { getActiveApiKey, getActivePdfApiKey, loadSettings, PROVIDER_PRESETS, saveSettings } from "../shared/settings";
-import type { OutputLanguage, Settings } from "../shared/types";
+import {
+  getActiveApiKey,
+  getActiveDeepPdfSummaryApiKey,
+  getActiveDeepPdfVisionApiKey,
+  getActivePdfApiKey,
+  loadSettings,
+  PROVIDER_PRESETS,
+  saveSettings
+} from "../shared/settings";
+import type { DatalabParseMode, OutputLanguage, Settings } from "../shared/types";
 import "./styles.css";
 
 function App() {
@@ -24,10 +32,20 @@ function App() {
       pdfApiKeys: trimApiKeys(settings.pdfApiKeys),
       providerConfigs: trimProviderConfigs(settings.providerConfigs),
       pdfProviderConfigs: trimProviderConfigs(settings.pdfProviderConfigs),
+      deepPdfSummaryProviderConfigs: trimProviderConfigs(settings.deepPdfSummaryProviderConfigs),
+      deepPdfVisionProviderConfigs: trimProviderConfigs(settings.deepPdfVisionProviderConfigs),
       endpoint: settings.endpoint.trim(),
       model: settings.model.trim(),
       pdfEndpoint: settings.pdfEndpoint.trim(),
-      pdfModel: settings.pdfModel.trim()
+      pdfModel: settings.pdfModel.trim(),
+      deepPdfParserEndpoint: settings.deepPdfParserEndpoint.trim(),
+      deepPdfParserApiKey: settings.deepPdfParserApiKey.trim(),
+      deepPdfSummaryApiKeys: trimApiKeys(settings.deepPdfSummaryApiKeys),
+      deepPdfSummaryEndpoint: settings.deepPdfSummaryEndpoint.trim(),
+      deepPdfSummaryModel: settings.deepPdfSummaryModel.trim(),
+      deepPdfVisionApiKeys: trimApiKeys(settings.deepPdfVisionApiKeys),
+      deepPdfVisionEndpoint: settings.deepPdfVisionEndpoint.trim(),
+      deepPdfVisionModel: settings.deepPdfVisionModel.trim()
     });
     setStatus("Saved.");
     window.setTimeout(() => setStatus(""), 1600);
@@ -42,6 +60,10 @@ function App() {
   const activeApiKey = getActiveApiKey(currentSettings);
   const activePdfPreset = currentSettings.pdfProviderId;
   const activePdfApiKey = getActivePdfApiKey(currentSettings);
+  const activeDeepPdfSummaryPreset = currentSettings.deepPdfSummaryProviderId;
+  const activeDeepPdfSummaryApiKey = getActiveDeepPdfSummaryApiKey(currentSettings);
+  const activeDeepPdfVisionPreset = currentSettings.deepPdfVisionProviderId;
+  const activeDeepPdfVisionApiKey = getActiveDeepPdfVisionApiKey(currentSettings);
 
   function applyPreset(presetId: string) {
     const preset = PROVIDER_PRESETS.find((item) => item.id === presetId);
@@ -167,6 +189,128 @@ function App() {
     });
   }
 
+  function applyDeepPdfSummaryPreset(presetId: string) {
+    const preset = PROVIDER_PRESETS.find((item) => item.id === presetId);
+    const savedConfig = currentSettings.deepPdfSummaryProviderConfigs[presetId];
+    if (presetId === "custom") {
+      setSettings({
+        ...currentSettings,
+        deepPdfSummaryProviderId: "custom",
+        deepPdfSummaryEndpoint:
+          currentSettings.deepPdfSummaryProviderConfigs.custom?.endpoint ?? currentSettings.deepPdfSummaryEndpoint,
+        deepPdfSummaryModel:
+          currentSettings.deepPdfSummaryProviderConfigs.custom?.model ?? currentSettings.deepPdfSummaryModel
+      });
+      return;
+    }
+    if (!preset) return;
+    setSettings({
+      ...currentSettings,
+      deepPdfSummaryProviderId: preset.id,
+      deepPdfSummaryEndpoint: savedConfig?.endpoint ?? preset.endpoint,
+      deepPdfSummaryModel: savedConfig?.model ?? preset.model
+    });
+  }
+
+  function updateDeepPdfSummaryApiKey(apiKey: string) {
+    setSettings({
+      ...currentSettings,
+      deepPdfSummaryApiKeys: {
+        ...currentSettings.deepPdfSummaryApiKeys,
+        [currentSettings.deepPdfSummaryProviderId]: apiKey
+      }
+    });
+  }
+
+  function updateDeepPdfSummaryEndpoint(endpoint: string) {
+    setSettings({
+      ...currentSettings,
+      deepPdfSummaryEndpoint: endpoint,
+      deepPdfSummaryProviderConfigs: {
+        ...currentSettings.deepPdfSummaryProviderConfigs,
+        [currentSettings.deepPdfSummaryProviderId]: {
+          endpoint,
+          model: currentSettings.deepPdfSummaryModel
+        }
+      }
+    });
+  }
+
+  function updateDeepPdfSummaryModel(model: string) {
+    setSettings({
+      ...currentSettings,
+      deepPdfSummaryModel: model,
+      deepPdfSummaryProviderConfigs: {
+        ...currentSettings.deepPdfSummaryProviderConfigs,
+        [currentSettings.deepPdfSummaryProviderId]: {
+          endpoint: currentSettings.deepPdfSummaryEndpoint,
+          model
+        }
+      }
+    });
+  }
+
+  function applyDeepPdfVisionPreset(presetId: string) {
+    const preset = PROVIDER_PRESETS.find((item) => item.id === presetId);
+    const savedConfig = currentSettings.deepPdfVisionProviderConfigs[presetId];
+    if (presetId === "custom") {
+      setSettings({
+        ...currentSettings,
+        deepPdfVisionProviderId: "custom",
+        deepPdfVisionEndpoint:
+          currentSettings.deepPdfVisionProviderConfigs.custom?.endpoint ?? currentSettings.deepPdfVisionEndpoint,
+        deepPdfVisionModel:
+          currentSettings.deepPdfVisionProviderConfigs.custom?.model ?? currentSettings.deepPdfVisionModel
+      });
+      return;
+    }
+    if (!preset) return;
+    setSettings({
+      ...currentSettings,
+      deepPdfVisionProviderId: preset.id,
+      deepPdfVisionEndpoint: savedConfig?.endpoint ?? preset.endpoint,
+      deepPdfVisionModel: savedConfig?.model ?? preset.model
+    });
+  }
+
+  function updateDeepPdfVisionApiKey(apiKey: string) {
+    setSettings({
+      ...currentSettings,
+      deepPdfVisionApiKeys: {
+        ...currentSettings.deepPdfVisionApiKeys,
+        [currentSettings.deepPdfVisionProviderId]: apiKey
+      }
+    });
+  }
+
+  function updateDeepPdfVisionEndpoint(endpoint: string) {
+    setSettings({
+      ...currentSettings,
+      deepPdfVisionEndpoint: endpoint,
+      deepPdfVisionProviderConfigs: {
+        ...currentSettings.deepPdfVisionProviderConfigs,
+        [currentSettings.deepPdfVisionProviderId]: {
+          endpoint,
+          model: currentSettings.deepPdfVisionModel
+        }
+      }
+    });
+  }
+
+  function updateDeepPdfVisionModel(model: string) {
+    setSettings({
+      ...currentSettings,
+      deepPdfVisionModel: model,
+      deepPdfVisionProviderConfigs: {
+        ...currentSettings.deepPdfVisionProviderConfigs,
+        [currentSettings.deepPdfVisionProviderId]: {
+          endpoint: currentSettings.deepPdfVisionEndpoint,
+          model
+        }
+      }
+    });
+  }
+
   return (
     <main className="settings-shell">
       <header>
@@ -246,6 +390,115 @@ function App() {
 
           <Field label="Model">
             <input value={currentSettings.pdfModel} onChange={(event) => updatePdfModel(event.target.value)} />
+          </Field>
+        </fieldset>
+
+        <fieldset>
+          <legend>PDF deep analysis</legend>
+
+          <Field label="Parser endpoint">
+            <input
+              type="url"
+              value={currentSettings.deepPdfParserEndpoint}
+              onChange={(event) => setSettings({ ...currentSettings, deepPdfParserEndpoint: event.target.value })}
+            />
+          </Field>
+
+          <Field label="Parser API key">
+            <input
+              type="password"
+              value={currentSettings.deepPdfParserApiKey}
+              autoComplete="off"
+              onChange={(event) => setSettings({ ...currentSettings, deepPdfParserApiKey: event.target.value })}
+              placeholder="Paste Datalab API key"
+            />
+          </Field>
+
+          <Field label="Parser mode">
+            <select
+              value={currentSettings.deepPdfParserMode}
+              onChange={(event) =>
+                setSettings({ ...currentSettings, deepPdfParserMode: event.target.value as DatalabParseMode })
+              }
+            >
+              <option value="balanced">balanced</option>
+              <option value="fast">fast</option>
+              <option value="accurate">accurate</option>
+            </select>
+          </Field>
+
+          <Field label="Summary provider">
+            <select value={activeDeepPdfSummaryPreset} onChange={(event) => applyDeepPdfSummaryPreset(event.target.value)}>
+              {PROVIDER_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}
+                </option>
+              ))}
+              <option value="custom">Custom</option>
+            </select>
+          </Field>
+
+          <Field label="Summary API key">
+            <input
+              type="password"
+              value={activeDeepPdfSummaryApiKey}
+              autoComplete="off"
+              onChange={(event) => updateDeepPdfSummaryApiKey(event.target.value)}
+              placeholder="Paste the selected summary provider key"
+            />
+          </Field>
+
+          <Field label="Summary endpoint">
+            <input
+              type="url"
+              value={currentSettings.deepPdfSummaryEndpoint}
+              onChange={(event) => updateDeepPdfSummaryEndpoint(event.target.value)}
+            />
+          </Field>
+
+          <Field label="Summary model">
+            <input
+              value={currentSettings.deepPdfSummaryModel}
+              onChange={(event) => updateDeepPdfSummaryModel(event.target.value)}
+            />
+          </Field>
+
+          <Field label="Further vision provider">
+            <select value={activeDeepPdfVisionPreset} onChange={(event) => applyDeepPdfVisionPreset(event.target.value)}>
+              <option value="custom">Custom / unused</option>
+              {PROVIDER_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Further vision API key">
+            <input
+              type="password"
+              value={activeDeepPdfVisionApiKey}
+              autoComplete="off"
+              onChange={(event) => updateDeepPdfVisionApiKey(event.target.value)}
+              placeholder="Optional"
+            />
+          </Field>
+
+          <Field label="Further vision endpoint">
+            <input
+              type="url"
+              value={currentSettings.deepPdfVisionEndpoint}
+              onChange={(event) => updateDeepPdfVisionEndpoint(event.target.value)}
+              placeholder="Optional"
+            />
+          </Field>
+
+          <Field label="Further vision model">
+            <input
+              value={currentSettings.deepPdfVisionModel}
+              onChange={(event) => updateDeepPdfVisionModel(event.target.value)}
+              placeholder="Optional"
+            />
           </Field>
         </fieldset>
 

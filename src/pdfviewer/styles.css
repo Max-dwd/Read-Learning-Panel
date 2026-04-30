@@ -124,6 +124,23 @@ body {
   top: 8px;
 }
 
+.pdf-block-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 5;
+}
+
+.pdf-block-highlight {
+  background: rgba(255, 210, 64, 0.18);
+  border: 2px solid rgba(215, 145, 0, 0.9);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+  min-height: 8px;
+  min-width: 8px;
+  position: absolute;
+}
+
 /* ── File picker landing ─────────────────────────────────── */
 
 .file-landing {

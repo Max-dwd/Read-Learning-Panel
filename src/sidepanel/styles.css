@@ -135,6 +135,8 @@ h3 {
 .history-panel,
 .pdf-panel,
 .pdf-answer,
+.pdf-deep-panel,
+.pdf-deep-section-card,
 .section-card {
   background: #fff;
   border: 1px solid #dde3ee;
@@ -197,6 +199,8 @@ h3 {
 .overall,
 .sections,
 .pdf-answers,
+.pdf-deep-panel,
+.pdf-deep-section-list,
 .pdf-pages,
 .pdf-page-list {
   display: flex;
@@ -206,13 +210,79 @@ h3 {
 
 .overall,
 .pdf-panel,
+.pdf-deep-panel,
 .pdf-answer {
   padding: 12px;
 }
 
 .pdf-guide-button {
-  margin-bottom: 12px;
   width: 100%;
+}
+
+.pdf-panel > .pdf-guide-button {
+  margin-bottom: 12px;
+}
+
+.pdf-mode-switch {
+  background: #eef2f7;
+  border-radius: 7px;
+  display: grid;
+  gap: 3px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 12px;
+  padding: 3px;
+}
+
+.pdf-mode-switch button {
+  background: transparent;
+  border: 0;
+  color: #526173;
+  min-height: 34px;
+}
+
+.pdf-mode-switch button.active {
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(30, 42, 62, 0.1);
+  color: #1f3f8a;
+}
+
+.pdf-deep-actions {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.pdf-deep-status,
+.pdf-deep-empty {
+  color: #526173;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.pdf-deep-section-card {
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.pdf-deep-section-card:hover {
+  border-color: #9bb3ee;
+}
+
+.pdf-deep-section-card.active {
+  border-color: #2458d3;
+  box-shadow: 0 0 0 2px rgba(36, 88, 211, 0.12);
+}
+
+.pdf-deep-section-card h3 {
+  font-size: 14px;
+  line-height: 1.35;
+  margin: 12px 14px 8px;
+}
+
+.pdf-deep-section-card .preview {
+  margin: 0;
+  padding: 0 14px 14px;
 }
 
 .pdf-controls {
