@@ -29,7 +29,7 @@ export function getPdfSourceUrl(tabUrl: string | undefined): string | null {
     const url = new URL(tabUrl);
     const viewerSource = url.searchParams.get("src") || url.searchParams.get("file");
     if (url.protocol === "chrome-extension:" && viewerSource) {
-      return decodeURIComponent(viewerSource);
+      return viewerSource;
     }
   } catch {
     // Fall through to direct URL parsing.

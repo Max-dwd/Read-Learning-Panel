@@ -188,6 +188,10 @@ function App() {
   const analysisStateRef = useRef<AnalyzeState>("idle");
   const runningSectionIdRef = useRef<string | null>(null);
   const followEnabledRef = useRef(false);
+  const currentArticleUrlRef = useRef<string | null>(null);
+  const scrollSaveSuppressionTokenRef = useRef(0);
+  const nextScrollSaveSuppressionTokenRef = useRef(1);
+  const loadingScrollSuppressionTokenRef = useRef<number | null>(null);
 
   useEffect(() => {
     void loadActivePage();
@@ -202,6 +206,10 @@ function App() {
   useEffect(() => {
     followEnabledRef.current = followEnabled;
   }, [followEnabled]);
+
+  useEffect(() => {
+    currentArticleUrlRef.current = article?.url ?? null;
+  }, [article?.url]);
 
   useEffect(() => {
     const handleViewerMessage = (
@@ -297,6 +305,9 @@ function App() {
   useEffect(() => {
     let timeoutId: number;
     const handleScroll = () => {
+      if (scrollSaveSuppressionTokenRef.current !== 0) {
+        return;
+      }
       if (viewMode === "reader" && currentPageKeyRef.current) {
         const cached = cacheRef.current.get(currentPageKeyRef.current);
         if (cached) {
@@ -320,9 +331,14 @@ function App() {
   }, [viewMode, article?.url]);
 
   useEffect(() => {
+    if (loadState !== "loading") {
+      releaseLoadingScrollSaveSuppression();
+    }
+
     if (viewMode === "reader" && loadState === "ready" && article) {
       const cached = cacheRef.current.get(currentPageKeyRef.current);
       if (cached && typeof cached.scrollPos === "number") {
+        const restoreToken = beginScrollSaveSuppression();
         // Use a small delay to ensure DOM is fully rendered and layout is stable
         const restore = () => {
           window.scrollTo({ top: cached.scrollPos, behavior: "instant" });
@@ -330,7 +346,15 @@ function App() {
         restore();
         // Sometimes content changes height after initial render, try again
         requestAnimationFrame(restore);
-        setTimeout(restore, 50);
+        const restoreTimeout = window.setTimeout(restore, 50);
+        const releaseTimeout = window.setTimeout(() => {
+          releaseScrollSaveSuppression(restoreToken);
+        }, 150);
+        return () => {
+          window.clearTimeout(restoreTimeout);
+          window.clearTimeout(releaseTimeout);
+          releaseScrollSaveSuppression(restoreToken);
+        };
       }
     }
   }, [article, viewMode, loadState]);
@@ -361,6 +385,8 @@ function App() {
           return;
         }
 
+        saveCurrentScrollPosition();
+        beginLoadingScrollSaveSuppression();
         setArticle(null);
         setAnalysis(null);
         setFollowUps({});
@@ -421,6 +447,8 @@ function App() {
 
   async function loadActivePage(force = false) {
     const loadVersion = ++loadVersionRef.current;
+    saveCurrentScrollPosition();
+    beginLoadingScrollSaveSuppression();
     setLoadState("loading");
     setLoadError("");
 
@@ -428,7 +456,7 @@ function App() {
       const tab = await getActiveTab();
       setActiveTabId(tab.id);
 
-      if (getPdfSourceUrl(tab.url)) {
+      if (getPdfSourceUrl(tab.url) || isCustomPdfViewerUrl(tab.url)) {
         setDocumentMode("pdf");
         await loadActivePdf(tab.url ?? "", loadVersion, force);
         return;
@@ -518,6 +546,9 @@ function App() {
       }
       setLoadState("error");
       setLoadError((error as Error).message);
+      requestAnimationFrame(() => {
+        releaseLoadingScrollSaveSuppression();
+      });
     }
   }
 
@@ -571,6 +602,11 @@ function App() {
       return;
     }
 
+    if (!getPdfSourceUrl(tabUrl)) {
+      setLoadState("ready");
+      return;
+    }
+
     const loadedPdf = await loadPdfDocument(tabUrl);
     if (loadVersion !== loadVersionRef.current) {
       return;
@@ -594,11 +630,14 @@ function App() {
     setPdfGuideError("");
     setPdfGuideRawError("");
     const savedDeepParse = await loadSavedDeepPdfParse(loadedPdf.sourceUrl, requestedDeepRange ?? "");
+    const savedDeepPdfBoundingBoxesVisible = savedDeepParse
+      ? await loadSavedDeepPdfBoundingBoxesVisible(savedDeepParse.sourceUrl, savedDeepParse.pageRange)
+      : false;
     setDeepPdfParse(savedDeepParse);
     setDeepPdfParseState(savedDeepParse ? "done" : "idle");
     setDeepPdfParseStatus(savedDeepParse ? "Loaded saved deep parse." : "");
 
-    if (requestedDeepRange !== null && savedDeepParse) {
+    if (savedDeepParse && (requestedDeepRange !== null || savedDeepPdfBoundingBoxesVisible)) {
       await applyDeepPdfParse(savedDeepParse, { restoreSaved: !force });
       void renderPdfPreview(loadedPdf);
       return;
@@ -662,6 +701,48 @@ function App() {
 
   async function refreshHistory() {
     setHistory(await loadHistory());
+  }
+
+  function saveCurrentScrollPosition() {
+    if (!currentPageKeyRef.current) {
+      return;
+    }
+    const cached = cacheRef.current.get(currentPageKeyRef.current);
+    if (!cached) {
+      return;
+    }
+    const scrollPos = window.scrollY;
+    cached.scrollPos = scrollPos;
+    const currentUrl = currentArticleUrlRef.current;
+    if (currentUrl) {
+      void updateHistoryScrollPos(currentUrl, scrollPos);
+    }
+  }
+
+  function beginScrollSaveSuppression() {
+    const token = nextScrollSaveSuppressionTokenRef.current;
+    nextScrollSaveSuppressionTokenRef.current += 1;
+    scrollSaveSuppressionTokenRef.current = token;
+    return token;
+  }
+
+  function releaseScrollSaveSuppression(token: number) {
+    if (scrollSaveSuppressionTokenRef.current === token) {
+      scrollSaveSuppressionTokenRef.current = 0;
+    }
+  }
+
+  function beginLoadingScrollSaveSuppression() {
+    loadingScrollSuppressionTokenRef.current = beginScrollSaveSuppression();
+  }
+
+  function releaseLoadingScrollSaveSuppression() {
+    const token = loadingScrollSuppressionTokenRef.current;
+    if (token === null) {
+      return;
+    }
+    loadingScrollSuppressionTokenRef.current = null;
+    releaseScrollSaveSuppression(token);
   }
 
   function applyPage(nextArticle: ExtractedArticle, nextAnalysis: AnalysisResult | null, pageKey: string) {
@@ -1580,6 +1661,19 @@ function App() {
             await chrome.tabs.update(tab.id, { url: viewerUrl });
           }}
           onOpenLocal={async () => {
+            const tab = await getActiveTab();
+            const viewerUrl = chrome.runtime.getURL("dist/pdfviewer.html");
+            await chrome.tabs.update(tab.id, { url: viewerUrl });
+          }}
+        />
+      )}
+
+      {viewMode === "reader" && documentMode === "pdf" && isInCustomViewer && !pdfDocument && loadState === "ready" && (
+        <EmptyState
+          title="No PDF loaded"
+          body="Open a PDF file in this viewer, or choose a saved PDF from History."
+          actionLabel="Open Local PDF"
+          onAction={async () => {
             const tab = await getActiveTab();
             const viewerUrl = chrome.runtime.getURL("dist/pdfviewer.html");
             await chrome.tabs.update(tab.id, { url: viewerUrl });

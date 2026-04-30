@@ -2,7 +2,7 @@ export type OutputLanguage = "follow-page" | "zh" | "en";
 export type PdfAnalysisMode = "visual" | "deep";
 export type DatalabParseMode = "fast" | "balanced" | "accurate";
 
-export const DEEP_PDF_GEOMETRY_VERSION = 2;
+export const DEEP_PDF_GEOMETRY_VERSION = 3;
 
 export type ProviderConfig = {
   endpoint: string;
@@ -89,6 +89,7 @@ export type DeepPdfBlock = {
   page: number;
   type: string;
   text: string;
+  caption?: string;
   html?: string;
   bbox?: PdfBoundingBox;
   polygon?: PdfPolygon;

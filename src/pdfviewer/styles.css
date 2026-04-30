@@ -132,21 +132,175 @@ body {
 }
 
 .pdf-block-highlight {
-  background: rgba(255, 210, 64, 0.18);
-  border: 2px solid rgba(215, 145, 0, 0.9);
+  --pdf-block-bg: rgba(245, 158, 11, 0.16);
+  --pdf-block-bg-hover: rgba(245, 158, 11, 0.28);
+  --pdf-block-border: rgba(180, 83, 9, 0.9);
+  --pdf-block-label-bg: rgb(120, 53, 15);
+  background: transparent;
+  border: 0;
   border-radius: 2px;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
   cursor: pointer;
   min-height: 8px;
   min-width: 8px;
   padding: 0;
   pointer-events: auto;
   position: absolute;
+  text-align: left;
 }
 
-.pdf-block-highlight:hover {
-  background: rgba(255, 210, 64, 0.32);
-  border-color: rgba(190, 112, 0, 0.95);
+.pdf-block-highlight-frame {
+  background: var(--pdf-block-bg);
+  border: 2px solid var(--pdf-block-border);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.pdf-block-hover-card {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  inset: 4px auto auto 4px;
+  max-height: calc(100% - 8px);
+  max-width: calc(100% - 8px);
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  transform: translateY(2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  width: fit-content;
+  text-align: left;
+}
+
+.pdf-block-type-label,
+.pdf-block-caption-label {
+  background: var(--pdf-block-label-bg);
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.22);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.2;
+  overflow: hidden;
+  padding: 4px 6px;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+.pdf-block-type-label {
+  font-weight: 700;
+  max-width: 180px;
+  white-space: nowrap;
+}
+
+.pdf-block-caption-label {
+  background: rgba(15, 23, 42, 0.92);
+  display: block;
+  font-weight: 600;
+  max-height: max(40px, calc(100% - 24px));
+  max-width: 100%;
+  overflow: auto;
+  white-space: normal;
+}
+
+.pdf-block-caption-label code {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  padding: 1px 3px;
+}
+
+.pdf-block-caption-label strong {
+  font-weight: 800;
+}
+
+.pdf-block-caption-label em {
+  font-style: italic;
+}
+
+.pdf-block-markdown-line {
+  display: block;
+}
+
+.pdf-block-markdown-line + .pdf-block-markdown-line {
+  margin-top: 3px;
+}
+
+.pdf-block-markdown-line.list {
+  padding-left: 12px;
+  position: relative;
+}
+
+.pdf-block-markdown-line.list::before {
+  content: "•";
+  left: 2px;
+  position: absolute;
+}
+
+.pdf-block-markdown-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pdf-block-highlight:hover,
+.pdf-block-highlight:focus-visible {
+  z-index: 2;
+}
+
+.pdf-block-highlight:hover .pdf-block-highlight-frame,
+.pdf-block-highlight:focus-visible .pdf-block-highlight-frame {
+  background: var(--pdf-block-bg-hover);
+}
+
+.pdf-block-highlight:hover .pdf-block-hover-card,
+.pdf-block-highlight:focus-visible .pdf-block-hover-card {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.pdf-block-highlight--heading {
+  --pdf-block-bg: rgba(37, 99, 235, 0.14);
+  --pdf-block-bg-hover: rgba(37, 99, 235, 0.26);
+  --pdf-block-border: rgba(29, 78, 216, 0.92);
+  --pdf-block-label-bg: rgb(30, 64, 175);
+}
+
+.pdf-block-highlight--list {
+  --pdf-block-bg: rgba(5, 150, 105, 0.14);
+  --pdf-block-bg-hover: rgba(5, 150, 105, 0.26);
+  --pdf-block-border: rgba(4, 120, 87, 0.92);
+  --pdf-block-label-bg: rgb(6, 95, 70);
+}
+
+.pdf-block-highlight--table {
+  --pdf-block-bg: rgba(124, 58, 237, 0.14);
+  --pdf-block-bg-hover: rgba(124, 58, 237, 0.26);
+  --pdf-block-border: rgba(109, 40, 217, 0.92);
+  --pdf-block-label-bg: rgb(91, 33, 182);
+}
+
+.pdf-block-highlight--figure {
+  --pdf-block-bg: rgba(234, 88, 12, 0.14);
+  --pdf-block-bg-hover: rgba(234, 88, 12, 0.26);
+  --pdf-block-border: rgba(194, 65, 12, 0.92);
+  --pdf-block-label-bg: rgb(154, 52, 18);
+}
+
+.pdf-block-highlight--equation {
+  --pdf-block-bg: rgba(225, 29, 72, 0.14);
+  --pdf-block-bg-hover: rgba(225, 29, 72, 0.26);
+  --pdf-block-border: rgba(190, 18, 60, 0.92);
+  --pdf-block-label-bg: rgb(159, 18, 57);
+}
+
+.pdf-block-highlight--other {
+  --pdf-block-bg: rgba(71, 85, 105, 0.14);
+  --pdf-block-bg-hover: rgba(71, 85, 105, 0.26);
+  --pdf-block-border: rgba(51, 65, 85, 0.92);
+  --pdf-block-label-bg: rgb(51, 65, 85);
 }
 
 /* ── File picker landing ─────────────────────────────────── */

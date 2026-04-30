@@ -371,10 +371,14 @@ function PdfBlockOverlay({
         }
         const targetSectionId = block.sectionId || sectionId;
         const geometry = getBlockGeometry(block, coordinateBase);
+        const blockType = formatBlockType(block.type);
+        const hoverMarkdown = getBlockHoverMarkdown(block);
+        const hoverText = markdownToPlainText(hoverMarkdown);
         return (
           <button
-            aria-label="Focus parsed section"
-            className="pdf-block-highlight"
+            aria-label={`Focus parsed ${blockType} block`}
+            className={`pdf-block-highlight pdf-block-highlight--${getBlockTypeTone(block.type)}`}
+            data-block-type={blockType}
             key={`${targetSectionId}-${block.id}`}
             onClick={(event) => {
               event.stopPropagation();
@@ -385,19 +389,180 @@ function PdfBlockOverlay({
                 .sendMessage({ type: "LEARN_VIEWER_FOCUS_PDF_SECTION", sectionId: targetSectionId })
                 .catch(() => undefined);
             }}
-            title={block.text.slice(0, 180)}
+            title={`${blockType}: ${hoverText || block.text.slice(0, 180)}`}
             style={{
-              clipPath: geometry.clipPath,
               left: `${clampPercent(geometry.left)}%`,
               top: `${clampPercent(geometry.top)}%`,
               width: `${clampPercent(geometry.width)}%`,
               height: `${clampPercent(geometry.height)}%`
             }}
-          />
+          >
+            <span className="pdf-block-highlight-frame" style={{ clipPath: geometry.clipPath }} />
+            <span className="pdf-block-hover-card">
+              <span className="pdf-block-type-label">{blockType}</span>
+              {hoverMarkdown && <span className="pdf-block-caption-label">{renderHoverMarkdown(hoverMarkdown)}</span>}
+            </span>
+          </button>
         );
       })}
     </div>
   );
+}
+
+function formatBlockType(type: string): string {
+  return type.trim() || "Text";
+}
+
+function getBlockHoverMarkdown(block: DeepPdfBlock): string {
+  const text = cleanHoverMarkdown(block.caption || block.text);
+  if (!text || text === block.type) {
+    return "";
+  }
+  return text;
+}
+
+function cleanHoverMarkdown(text: string): string {
+  return stripImageMarkdown(text)
+    .replace(/<img\b[^>]*>/gi, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function stripImageMarkdown(text: string): string {
+  let output = "";
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const start = text.indexOf("![", cursor);
+    if (start === -1) {
+      output += text.slice(cursor);
+      break;
+    }
+
+    output += text.slice(cursor, start);
+    const altEnd = findClosingBracket(text, start + 2, "[", "]");
+    if (altEnd === -1 || text[altEnd + 1] !== "(") {
+      output += "![";
+      cursor = start + 2;
+      continue;
+    }
+
+    const urlEnd = findClosingBracket(text, altEnd + 2, "(", ")");
+    if (urlEnd === -1) {
+      output += "![";
+      cursor = start + 2;
+      continue;
+    }
+
+    cursor = urlEnd + 1;
+  }
+
+  return output;
+}
+
+function findClosingBracket(text: string, start: number, open: string, close: string): number {
+  let depth = 1;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === open) {
+      depth += 1;
+    } else if (char === close) {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+  return -1;
+}
+
+function markdownToPlainText(markdown: string): string {
+  return markdown
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function renderHoverMarkdown(markdown: string): React.ReactNode {
+  return markdown.split(/\n/).map((line, index) => {
+    const normalizedLine = line.trim();
+    if (!normalizedLine) {
+      return <br key={`br-${index}`} />;
+    }
+
+    const listMatch = normalizedLine.match(/^[-*]\s+(.+)$/);
+    return (
+      <span className={listMatch ? "pdf-block-markdown-line list" : "pdf-block-markdown-line"} key={`${index}-${normalizedLine}`}>
+        {listMatch ? renderInlineMarkdown(listMatch[1]) : renderInlineMarkdown(normalizedLine)}
+      </span>
+    );
+  });
+}
+
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > cursor) {
+      nodes.push(text.slice(cursor, match.index));
+    }
+
+    const token = match[0];
+    const key = `${match.index}-${token}`;
+    if (token.startsWith("`")) {
+      nodes.push(<code key={key}>{token.slice(1, -1)}</code>);
+    } else if (token.startsWith("**")) {
+      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith("*")) {
+      nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
+    } else {
+      const link = token.match(/^\[([^\]]+)\]\([^)]+\)$/);
+      nodes.push(<span className="pdf-block-markdown-link" key={key}>{link?.[1] ?? token}</span>);
+    }
+
+    cursor = match.index + token.length;
+  }
+
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor));
+  }
+
+  return nodes;
+}
+
+function getBlockTypeTone(type: string): string {
+  const normalized = type.replace(/[\s_-]+/g, "").toLowerCase();
+  if (/sectionheader|heading|title|header/.test(normalized)) {
+    return "heading";
+  }
+  if (/listgroup|listitem|list/.test(normalized)) {
+    return "list";
+  }
+  if (/table|form/.test(normalized)) {
+    return "table";
+  }
+  if (/figure|picture|image|caption/.test(normalized)) {
+    return "figure";
+  }
+  if (/equation|formula|code/.test(normalized)) {
+    return "equation";
+  }
+  if (/text|paragraph|body|span|line/.test(normalized)) {
+    return "text";
+  }
+  return "other";
 }
 
 function getCoordinateBase(

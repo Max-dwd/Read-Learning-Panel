@@ -174,9 +174,10 @@ function buildCheckUrl(endpoint: string, submitBody: DatalabSubmitResponse | nul
 
 function extractBlocks(result: DatalabPollResponse, pageCount: number): DeepPdfBlock[] {
   const rawBlocks = collectRawBlocks(result);
-  return rawBlocks
+  const blocks = rawBlocks
     .map(({ block, page }, index) => normalizeBlock(block, index, page, pageCount))
     .filter((block): block is DeepPdfBlock => Boolean(block));
+  return attachNearbyCaptions(blocks);
 }
 
 function collectRawBlocks(result: DatalabPollResponse): RawDatalabBlockWithPage[] {
@@ -201,21 +202,84 @@ function normalizeBlock(
   }
 
   const html = readString(block.html);
-  const text = readString(block.markdown) || readString(block.text) || stripHtml(html);
-  if (!text.trim()) {
+  const polygon = readPolygon(block.polygon);
+  const bbox = readBbox(block.bbox) ?? polygonToBbox(polygon);
+  const type = readString(block.block_type) || readString(block.type) || "Text";
+  const caption = readCaptionText(block);
+  const text = readString(block.markdown) || readString(block.text) || stripHtml(html) || caption;
+  if (!text.trim() && !bbox) {
     return null;
   }
 
-  const polygon = readPolygon(block.polygon);
   return {
     id: readString(block.id) || readString(block.block_id) || `block-${index + 1}`,
     page,
-    type: readString(block.block_type) || readString(block.type) || "Text",
-    text: text.trim(),
+    type,
+    text: text.trim() || type,
+    caption: caption || undefined,
     html: html || undefined,
-    bbox: readBbox(block.bbox) ?? polygonToBbox(polygon),
+    bbox,
     polygon
   };
+}
+
+function attachNearbyCaptions(blocks: DeepPdfBlock[]): DeepPdfBlock[] {
+  const captions = blocks.filter((block) => isCaptionBlock(block) && block.bbox && block.text.trim());
+  if (captions.length === 0) {
+    return blocks;
+  }
+
+  return blocks.map((block) => {
+    if (block.caption || !isCaptionableBlock(block) || !block.bbox) {
+      return block;
+    }
+
+    const caption = findNearestCaption(block, captions);
+    return caption ? { ...block, caption: caption.text } : block;
+  });
+}
+
+function findNearestCaption(block: DeepPdfBlock, captions: DeepPdfBlock[]): DeepPdfBlock | null {
+  if (!block.bbox) {
+    return null;
+  }
+
+  const [x1, y1, x2, y2] = block.bbox;
+  const blockCenterX = (x1 + x2) / 2;
+  const blockHeight = Math.max(1, y2 - y1);
+  let best: { block: DeepPdfBlock; score: number } | null = null;
+
+  for (const caption of captions) {
+    if (caption.page !== block.page || !caption.bbox) {
+      continue;
+    }
+
+    const [cx1, cy1, cx2, cy2] = caption.bbox;
+    const captionCenterX = (cx1 + cx2) / 2;
+    const verticalGap = cy1 >= y2 ? cy1 - y2 : y1 >= cy2 ? y1 - cy2 : 0;
+    const horizontalGap = Math.max(0, Math.max(x1, cx1) - Math.min(x2, cx2));
+    const centerDistance = Math.abs(captionCenterX - blockCenterX);
+    const maxNearbyDistance = Math.max(40, blockHeight * 0.8);
+
+    if (verticalGap > maxNearbyDistance || horizontalGap > Math.max(80, (x2 - x1) * 0.4)) {
+      continue;
+    }
+
+    const score = verticalGap + centerDistance * 0.15 + horizontalGap;
+    if (!best || score < best.score) {
+      best = { block: caption, score };
+    }
+  }
+
+  return best?.block ?? null;
+}
+
+function isCaptionableBlock(block: DeepPdfBlock): boolean {
+  return /figure|picture|image|table/i.test(block.type);
+}
+
+function isCaptionBlock(block: DeepPdfBlock): boolean {
+  return /caption/i.test(block.type);
 }
 
 function extractPageBboxes(result: DatalabPollResponse, _blocks: DeepPdfBlock[]): Record<number, PdfBoundingBox> {
@@ -316,6 +380,25 @@ function collectPageCandidates(value: unknown): RawDatalabBlock[] {
 function readChildren(block: RawDatalabBlock): RawDatalabBlock[] {
   const children = block.children;
   return Array.isArray(children) ? children.filter(isObject) as RawDatalabBlock[] : [];
+}
+
+function readCaptionText(block: RawDatalabBlock): string {
+  const captions = collectCaptionBlocks(block)
+    .map((captionBlock) => {
+      const html = readString(captionBlock.html);
+      return readString(captionBlock.markdown) || readString(captionBlock.text) || stripHtml(html);
+    })
+    .map((text) => text.trim())
+    .filter(Boolean);
+  return uniqueStrings(captions).join("\n");
+}
+
+function collectCaptionBlocks(block: RawDatalabBlock): RawDatalabBlock[] {
+  return readChildren(block).flatMap((child) => {
+    const type = readString(child.block_type) || readString(child.type);
+    const nested = collectCaptionBlocks(child);
+    return /caption/i.test(type) ? [child, ...nested] : nested;
+  });
 }
 
 function isPageBlock(block: RawDatalabBlock): boolean {
@@ -476,6 +559,10 @@ function parseMaybeJson(value: unknown): unknown {
 
 function readString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 function stripHtml(html: string): string {
