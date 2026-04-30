@@ -31,7 +31,8 @@
   "permissions": ["activeTab", "sidePanel", "scripting", "storage", "tabs"],
   "host_permissions": [
     "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "file:///*"
   ],
   "side_panel": {
     "default_path": "sidepanel.html"

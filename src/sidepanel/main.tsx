@@ -17,13 +17,24 @@ import {
   updateHistoryScrollPos,
   type HistoryEntry
 } from "../shared/history";
-import { analyzeArticleProgressively, answerSectionQuestion } from "../shared/model";
-import { getActiveApiKey, loadSettings } from "../shared/settings";
+import { analyzeArticleProgressively, answerPdfQuestion, answerSectionQuestion, generatePdfGuide } from "../shared/model";
+import {
+  getPdfSourceUrl,
+  getPdfTargetPageFromUrl,
+  loadPdfDocument,
+  parsePdfPageRange,
+  renderPdfPage,
+  renderPdfPages,
+  type LoadedPdfDocument,
+  type PdfPageImage
+} from "../shared/pdf";
+import { getActiveApiKey, getActivePdfApiKey, loadSettings } from "../shared/settings";
 import type {
   AnalysisResult,
   ContentRequest,
   ContentResponse,
   ExtractedArticle,
+  PdfGuideResult,
   SectionFollowUp,
   Settings
 } from "../shared/types";
@@ -33,6 +44,16 @@ type LoadState = "idle" | "loading" | "ready" | "error";
 type AnalyzeState = "idle" | "running" | "done" | "error";
 type SectionAnalyzeState = "queued" | "running" | "done" | "error";
 type ViewMode = "reader" | "history";
+type DocumentMode = "article" | "pdf";
+type PdfQuestionState = "idle" | "running" | "error";
+type PdfPreviewState = "idle" | "rendering" | "ready" | "error";
+type PdfAnswer = {
+  question: string;
+  answer: string;
+  pages: number[];
+  targetPage: number | null;
+  createdAt: number;
+};
 type PageCacheEntry = {
   article: ExtractedArticle;
   analysis: AnalysisResult | null;
@@ -59,6 +80,22 @@ function App() {
   const [followUps, setFollowUps] = useState<Record<string, SectionFollowUp[]>>({});
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>("reader");
+  const [documentMode, setDocumentMode] = useState<DocumentMode>("article");
+  const [pdfDocument, setPdfDocument] = useState<LoadedPdfDocument | null>(null);
+  const [pdfPageRange, setPdfPageRange] = useState("all");
+  const [pdfTargetPage, setPdfTargetPage] = useState("1");
+  const [pdfQuestion, setPdfQuestion] = useState("");
+  const [pdfQuestionState, setPdfQuestionState] = useState<PdfQuestionState>("idle");
+  const [pdfError, setPdfError] = useState("");
+  const [pdfRawError, setPdfRawError] = useState("");
+  const [pdfAnswers, setPdfAnswers] = useState<PdfAnswer[]>([]);
+  const [pdfGuide, setPdfGuide] = useState<PdfGuideResult | null>(null);
+  const [pdfGuideState, setPdfGuideState] = useState<PdfQuestionState>("idle");
+  const [pdfGuideError, setPdfGuideError] = useState("");
+  const [pdfGuideRawError, setPdfGuideRawError] = useState("");
+  const [pdfPageImages, setPdfPageImages] = useState<PdfPageImage[]>([]);
+  const [pdfPreviewState, setPdfPreviewState] = useState<PdfPreviewState>("idle");
+  const [pdfPreviewError, setPdfPreviewError] = useState("");
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
   const [pendingQuestions, setPendingQuestions] = useState<Record<string, boolean>>({});
   const [questionErrors, setQuestionErrors] = useState<Record<string, string>>({});
@@ -66,8 +103,10 @@ function App() {
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const [selectionQuote, setSelectionQuote] = useState("");
   const cacheRef = useRef(new Map<string, PageCacheEntry>());
+  const pdfDocumentRef = useRef<LoadedPdfDocument | null>(null);
   const currentPageKeyRef = useRef("");
   const loadVersionRef = useRef(0);
+  const pdfPreviewVersionRef = useRef(0);
   const analysisVersionRef = useRef(0);
   const analysisStateRef = useRef<AnalyzeState>("idle");
   const runningSectionIdRef = useRef<string | null>(null);
@@ -139,6 +178,19 @@ function App() {
         setSectionAnalyzeErrors({});
         setActiveQuestionSectionId(null);
         setAnalysisState("idle");
+        setPdfDocument(null);
+        pdfDocumentRef.current = null;
+        setPdfAnswers([]);
+        setPdfGuide(null);
+        setPdfGuideState("idle");
+        setPdfGuideError("");
+        setPdfGuideRawError("");
+        setPdfPageImages([]);
+        setPdfPreviewState("idle");
+        setPdfPreviewError("");
+        setPdfError("");
+        setPdfRawError("");
+        setPdfQuestionState("idle");
         setLoadState("loading");
       }
       if (changeInfo.status === "complete") {
@@ -175,6 +227,26 @@ function App() {
     try {
       const tab = await getActiveTab();
       setActiveTabId(tab.id);
+
+      if (getPdfSourceUrl(tab.url)) {
+        setDocumentMode("pdf");
+        await loadActivePdf(tab.url ?? "", loadVersion, force);
+        return;
+      }
+
+      setDocumentMode("article");
+      setPdfDocument(null);
+      pdfDocumentRef.current = null;
+      setPdfError("");
+      setPdfRawError("");
+      setPdfQuestionState("idle");
+      setPdfGuide(null);
+      setPdfGuideState("idle");
+      setPdfGuideError("");
+      setPdfGuideRawError("");
+      setPdfPageImages([]);
+      setPdfPreviewState("idle");
+      setPdfPreviewError("");
 
       const optimisticKey = tab.url ? getPageKey(tab.url) : "";
       if (!force && optimisticKey === currentPageKeyRef.current && analysisStateRef.current === "running") {
@@ -236,6 +308,78 @@ function App() {
       }
       setLoadState("error");
       setLoadError((error as Error).message);
+    }
+  }
+
+  async function loadActivePdf(tabUrl: string, loadVersion: number, force: boolean) {
+    const currentPdf = pdfDocumentRef.current;
+    if (!force && currentPdf?.url === tabUrl) {
+      setPdfDocument(currentPdf);
+      setLoadState("ready");
+      return;
+    }
+
+    setArticle(null);
+    setAnalysis(null);
+    setFollowUps({});
+    setSectionAnalyzeState({});
+    setSectionAnalyzeErrors({});
+    setAnalysisState("idle");
+    setAnalysisError("");
+    setRawError("");
+    setPdfError("");
+    setPdfRawError("");
+    setPdfQuestionState("idle");
+    setPdfGuide(null);
+    setPdfGuideState("idle");
+    setPdfGuideError("");
+    setPdfGuideRawError("");
+    setPdfPageImages([]);
+    setPdfPreviewState("idle");
+    setPdfPreviewError("");
+    currentPageKeyRef.current = tabUrl;
+
+    const loadedPdf = await loadPdfDocument(tabUrl);
+    if (loadVersion !== loadVersionRef.current) {
+      return;
+    }
+
+    const targetPage = Math.min(getPdfTargetPageFromUrl(tabUrl), loadedPdf.pageCount);
+    pdfDocumentRef.current = loadedPdf;
+    setPdfDocument(loadedPdf);
+    setPdfPageRange("all");
+    setPdfTargetPage(String(targetPage));
+    setPdfQuestion("");
+    setPdfAnswers([]);
+    setPdfGuide(null);
+    setPdfGuideState("idle");
+    setPdfGuideError("");
+    setPdfGuideRawError("");
+    setLoadState("ready");
+    void renderPdfPreview(loadedPdf);
+  }
+
+  async function renderPdfPreview(loadedPdf: LoadedPdfDocument) {
+    const previewVersion = ++pdfPreviewVersionRef.current;
+    setPdfPreviewState("rendering");
+    setPdfPreviewError("");
+    setPdfPageImages([]);
+
+    try {
+      for (let page = 1; page <= loadedPdf.pageCount; page += 1) {
+        const image = await renderPdfPage(loadedPdf.pdf, page);
+        if (previewVersion !== pdfPreviewVersionRef.current || pdfDocumentRef.current?.url !== loadedPdf.url) {
+          return;
+        }
+        setPdfPageImages((images) => [...images, image]);
+      }
+      setPdfPreviewState("ready");
+    } catch (error) {
+      if (previewVersion !== pdfPreviewVersionRef.current) {
+        return;
+      }
+      setPdfPreviewState("error");
+      setPdfPreviewError((error as Error).message);
     }
   }
 
@@ -457,6 +601,107 @@ function App() {
         setRawError(typedError.raw ?? "");
       }
     }
+  }
+
+  async function askPdf() {
+    const loadedPdf = pdfDocumentRef.current;
+    if (!loadedPdf || !settings) {
+      return;
+    }
+
+    const question = normalizeQuestion(pdfQuestion);
+    if (!question) {
+      return;
+    }
+
+    setPdfQuestionState("running");
+    setPdfError("");
+    setPdfRawError("");
+
+    try {
+      const currentSettings = await loadSettings();
+      setSettings(currentSettings);
+      const pages = parsePdfPageRange(pdfPageRange, loadedPdf.pageCount);
+      if (pages.length > 50) {
+        throw new Error("Too many PDF pages for one request. Use a page range of 50 pages or fewer.");
+      }
+
+      const parsedTargetPage = Number(pdfTargetPage);
+      const targetPage =
+        Number.isInteger(parsedTargetPage) && parsedTargetPage >= 1 && parsedTargetPage <= loadedPdf.pageCount
+          ? parsedTargetPage
+          : null;
+      const pageImages = await getPdfImagesForPages(loadedPdf, pages);
+      const answer = await answerPdfQuestion({
+        title: loadedPdf.title,
+        url: loadedPdf.sourceUrl,
+        pageImages,
+        targetPage,
+        question,
+        settings: currentSettings
+      });
+
+      setPdfAnswers((answers) => [
+        ...answers,
+        {
+          question,
+          answer,
+          pages,
+          targetPage,
+          createdAt: Date.now()
+        }
+      ]);
+      setPdfQuestion("");
+      setPdfQuestionState("idle");
+    } catch (error) {
+      const typedError = error as Error & { raw?: string };
+      setPdfQuestionState("error");
+      setPdfError(typedError.message);
+      setPdfRawError(typedError.raw ?? "");
+    }
+  }
+
+  async function runPdfGuide() {
+    const loadedPdf = pdfDocumentRef.current;
+    if (!loadedPdf || !settings) {
+      return;
+    }
+
+    setPdfGuideState("running");
+    setPdfGuide(null);
+    setPdfGuideError("");
+    setPdfGuideRawError("");
+
+    try {
+      const currentSettings = await loadSettings();
+      setSettings(currentSettings);
+      const pages = Array.from({ length: loadedPdf.pageCount }, (_, index) => index + 1);
+      if (pages.length > 50) {
+        throw new Error("Too many PDF pages for one guide request. Use a PDF of 50 pages or fewer for one-click guide generation.");
+      }
+      const pageImages = await getPdfImagesForPages(loadedPdf, pages);
+      const guide = await generatePdfGuide({
+        title: loadedPdf.title,
+        url: loadedPdf.sourceUrl,
+        pageImages,
+        settings: currentSettings
+      });
+      setPdfGuide(guide);
+      setPdfGuideState("idle");
+    } catch (error) {
+      const typedError = error as Error & { raw?: string };
+      setPdfGuideState("error");
+      setPdfGuideError(typedError.message);
+      setPdfGuideRawError(typedError.raw ?? "");
+    }
+  }
+
+  async function getPdfImagesForPages(loadedPdf: LoadedPdfDocument, pages: number[]): Promise<PdfPageImage[]> {
+    const cachedImages = new Map(pdfPageImages.map((image) => [image.page, image]));
+    const cachedPageImages = pages.map((page) => cachedImages.get(page));
+    return cachedPageImages.every(Boolean)
+      ? (cachedPageImages as PdfPageImage[])
+      : renderPdfPages(loadedPdf.pdf, pages);
   }
 
   function updateCachedAnalysis(
@@ -687,6 +932,9 @@ function App() {
   }
 
   const needsSettings = settings ? !getActiveApiKey(settings) || !settings.model.trim() || !settings.endpoint.trim() : false;
+  const needsPdfSettings = settings
+    ? !getActivePdfApiKey(settings) || !settings.pdfModel.trim() || !settings.pdfEndpoint.trim()
+    : false;
   const completedSectionCount = article ? article.sections.filter((section) => sectionAnalyzeState[section.id] === "done").length : 0;
   const runningSectionIndex = article?.sections.findIndex((section) => sectionAnalyzeState[section.id] === "running") ?? -1;
   const hasAnyFollowUps = Object.values(followUps).some((list) => list.length > 0);
@@ -697,7 +945,7 @@ function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">Learning Panel</p>
-          <h1>{article?.title || "Current page"}</h1>
+          <h1>{documentMode === "pdf" ? pdfDocument?.title || "PDF document" : article?.title || "Current page"}</h1>
         </div>
         <div className="topbar-actions">
           {(hasAnalysis || hasAnyFollowUps) && (
@@ -739,7 +987,38 @@ function App() {
         />
       )}
 
-      {viewMode === "reader" && article && (
+      {viewMode === "reader" && documentMode === "pdf" && pdfDocument && (
+        <PdfReader
+          pdfDocument={pdfDocument}
+          pageRange={pdfPageRange}
+          targetPage={pdfTargetPage}
+          question={pdfQuestion}
+          answers={pdfAnswers}
+          guide={pdfGuide}
+          guideState={pdfGuideState}
+          guideError={pdfGuideError}
+          guideRawError={pdfGuideRawError}
+          pageImages={pdfPageImages}
+          previewState={pdfPreviewState}
+          previewError={pdfPreviewError}
+          state={pdfQuestionState}
+          error={pdfError}
+          rawError={pdfRawError}
+          needsSettings={needsPdfSettings}
+          onPageRangeChange={setPdfPageRange}
+          onTargetPageChange={setPdfTargetPage}
+          onQuestionChange={setPdfQuestion}
+          onGenerateGuide={() => void runPdfGuide()}
+          onFocusPage={(page) => {
+            setPdfTargetPage(String(page));
+            setPdfPageRange("all");
+          }}
+          onAsk={() => void askPdf()}
+          onOpenSettings={() => chrome.runtime.openOptionsPage()}
+        />
+      )}
+
+      {viewMode === "reader" && documentMode === "article" && article && (
         <>
           <section className="page-meta">
             <div>
@@ -918,6 +1197,198 @@ function App() {
         </>
       )}
     </main>
+  );
+}
+
+function PdfReader({
+  pdfDocument,
+  pageRange,
+  targetPage,
+  question,
+  answers,
+  guide,
+  guideState,
+  guideError,
+  guideRawError,
+  pageImages,
+  previewState,
+  previewError,
+  state,
+  error,
+  rawError,
+  needsSettings,
+  onPageRangeChange,
+  onTargetPageChange,
+  onQuestionChange,
+  onGenerateGuide,
+  onFocusPage,
+  onAsk,
+  onOpenSettings
+}: {
+  pdfDocument: LoadedPdfDocument;
+  pageRange: string;
+  targetPage: string;
+  question: string;
+  answers: PdfAnswer[];
+  guide: PdfGuideResult | null;
+  guideState: PdfQuestionState;
+  guideError: string;
+  guideRawError: string;
+  pageImages: PdfPageImage[];
+  previewState: PdfPreviewState;
+  previewError: string;
+  state: PdfQuestionState;
+  error: string;
+  rawError: string;
+  needsSettings: boolean;
+  onPageRangeChange: (value: string) => void;
+  onTargetPageChange: (value: string) => void;
+  onQuestionChange: (value: string) => void;
+  onGenerateGuide: () => void;
+  onFocusPage: (page: number) => void;
+  onAsk: () => void;
+  onOpenSettings: () => void;
+}) {
+  const canAsk = !needsSettings && state !== "running" && normalizeQuestion(question);
+  const canGenerateGuide = !needsSettings && guideState !== "running";
+  const focusedPage = Number(targetPage);
+  const guideByPage = useMemo(() => new Map((guide?.pages ?? []).map((pageGuide) => [pageGuide.page, pageGuide])), [guide]);
+  return (
+    <>
+      <section className="page-meta">
+        <div>
+          <span>{pdfDocument.pageCount} pages</span>
+          <a href={pdfDocument.sourceUrl} target="_blank" rel="noreferrer">
+            Open PDF
+          </a>
+        </div>
+        <p>{pdfDocument.sourceUrl}</p>
+      </section>
+
+      {needsSettings && (
+        <section className="warning">
+          <strong>PDF settings needed</strong>
+          <span>Add your API key, endpoint, and PDF parsing model before asking about this PDF.</span>
+          <button type="button" onClick={onOpenSettings}>
+            Open settings
+          </button>
+        </section>
+      )}
+
+      <section className="pdf-panel">
+        <button className="pdf-guide-button" type="button" disabled={!canGenerateGuide} onClick={onGenerateGuide}>
+          {guideState === "running" ? "Generating page guides..." : "Generate page guides"}
+        </button>
+
+        <div className="pdf-controls">
+          <label>
+            <span>Pages sent to model</span>
+            <input value={pageRange} onChange={(event) => onPageRangeChange(event.target.value)} placeholder="all or 1-5" />
+          </label>
+          <label>
+            <span>Focus page</span>
+            <input
+              type="number"
+              min={1}
+              max={pdfDocument.pageCount}
+              value={targetPage}
+              onChange={(event) => onTargetPageChange(event.target.value)}
+            />
+          </label>
+        </div>
+
+        <form
+          className="pdf-question-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onAsk();
+          }}
+        >
+          <textarea
+            value={question}
+            disabled={state === "running"}
+            placeholder="Ask about this PDF..."
+            onChange={(event) => onQuestionChange(event.target.value)}
+          />
+          <button type="submit" disabled={!canAsk}>
+            {state === "running" ? "Reading PDF..." : "Ask PDF"}
+          </button>
+        </form>
+      </section>
+
+      {guideState === "running" && <Status text="Generating summary, explanation, and goal for every PDF page..." />}
+      {guideState === "error" && (
+        <section className="error-box">
+          <strong>PDF page guide failed</strong>
+          <p>{guideError}</p>
+          {guideRawError && <pre>{guideRawError}</pre>}
+        </section>
+      )}
+
+      {state === "running" && <Status text="Rendering PDF pages and sending them to the vision model..." />}
+      {state === "error" && (
+        <section className="error-box">
+          <strong>PDF question failed</strong>
+          <p>{error}</p>
+          {rawError && <pre>{rawError}</pre>}
+        </section>
+      )}
+
+      <section className="pdf-pages">
+        <div className="pdf-pages-header">
+          <h2>Pages</h2>
+          <span>
+            {pageImages.length} / {pdfDocument.pageCount} rendered
+          </span>
+        </div>
+        {previewState === "rendering" && <Status text="Rendering PDF page previews..." />}
+        {previewState === "error" && (
+          <section className="error-box">
+            <strong>PDF preview failed</strong>
+            <p>{previewError}</p>
+          </section>
+        )}
+        <div className="pdf-page-list">
+          {pageImages.map((image) => {
+            const pageGuide = guideByPage.get(image.page);
+            return (
+              <article className={`pdf-page-card${image.page === focusedPage ? " active" : ""}`} key={image.page}>
+                <button type="button" className="pdf-page-header" onClick={() => onFocusPage(image.page)}>
+                  <span>Page {image.page}</span>
+                  {image.page === focusedPage && <strong>Focus</strong>}
+                </button>
+                <button type="button" className="pdf-page-image-button" onClick={() => onFocusPage(image.page)}>
+                  <img src={image.dataUrl} alt={`PDF page ${image.page}`} loading="lazy" />
+                </button>
+                {pageGuide && (
+                  <div className="pdf-page-guide">
+                    <InfoBlock title="Summary" body={pageGuide.summary} />
+                    <InfoBlock title="Explanation" body={pageGuide.explanation} />
+                    <InfoBlock title="Goal" body={pageGuide.goal} />
+                  </div>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      {answers.length > 0 && (
+        <section className="pdf-answers">
+          <h2>PDF Q&A</h2>
+          {answers.map((item) => (
+            <article className="pdf-answer" key={`${item.createdAt}-${item.question}`}>
+              <div className="pdf-answer-meta">
+                <span>Pages {formatPages(item.pages)}</span>
+                {item.targetPage && <span>Target {item.targetPage}</span>}
+              </div>
+              <h3>{item.question}</h3>
+              <MarkupBlocks text={item.answer} />
+            </article>
+          ))}
+        </section>
+      )}
+    </>
   );
 }
 
@@ -1207,6 +1678,13 @@ function getPageKey(url: string): string {
 
 function normalizeQuestion(value: string): string {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function formatPages(pages: number[]): string {
+  if (pages.length <= 8) {
+    return pages.join(", ");
+  }
+  return `${pages.slice(0, 4).join(", ")} ... ${pages.slice(-2).join(", ")}`;
 }
 
 function formatSectionAnalyzeState(state: SectionAnalyzeState): string {

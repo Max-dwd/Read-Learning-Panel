@@ -4,10 +4,12 @@ import type {
   ExtractedArticle,
   ExtractedSection,
   OutputLanguage,
+  PdfGuideResult,
   SectionFollowUp,
   Settings
 } from "./types";
-import { getActiveApiKey } from "./settings";
+import { getActiveApiKey, getActivePdfApiKey } from "./settings";
+import type { PdfPageImage } from "./pdf";
 
 const MAX_TOTAL_CHARS = 42000;
 const MAX_SECTION_CHARS = 3600;
@@ -20,7 +22,7 @@ const INTERPRETATION_GUIDANCE =
 type OpenAIResponse = {
   choices?: Array<{
     message?: {
-      content?: string;
+      content?: unknown;
     };
   }>;
   error?: {
@@ -81,7 +83,7 @@ export async function analyzeArticle(
     throw new Error(body?.error?.message ?? `Model request failed with HTTP ${response.status}`);
   }
 
-  const raw = body?.choices?.[0]?.message?.content;
+  const raw = extractResponseText(body);
   if (!raw) {
     throw new Error("Model response did not contain choices[0].message.content.");
   }
@@ -219,7 +221,7 @@ export async function analyzeArticleOverview(
     throw new Error(body?.error?.message ?? `Model request failed with HTTP ${response.status}`);
   }
 
-  const raw = body?.choices?.[0]?.message?.content;
+  const raw = extractResponseText(body);
   if (!raw) {
     throw new Error("Model response did not contain choices[0].message.content.");
   }
@@ -277,7 +279,7 @@ export async function analyzeArticleSection({
     throw new Error(body?.error?.message ?? `Model request failed with HTTP ${response.status}`);
   }
 
-  const raw = body?.choices?.[0]?.message?.content;
+  const raw = extractResponseText(body);
   if (!raw) {
     throw new Error("Model response did not contain choices[0].message.content.");
   }
@@ -340,12 +342,237 @@ export async function answerSectionQuestion({
     throw new Error(body?.error?.message ?? `Model request failed with HTTP ${response.status}`);
   }
 
-  const answer = body?.choices?.[0]?.message?.content?.trim();
+  const answer = extractResponseText(body).trim();
   if (!answer) {
     throw new Error("Model response did not contain choices[0].message.content.");
   }
 
   return stripCodeFence(answer);
+}
+
+export async function answerPdfQuestion({
+  title,
+  url,
+  pageImages,
+  targetPage,
+  question,
+  settings
+}: {
+  title: string;
+  url: string;
+  pageImages: PdfPageImage[];
+  targetPage: number | null;
+  question: string;
+  settings: Settings;
+}): Promise<string> {
+  return requestPdfVision({
+    pageImages,
+    prompt: buildPdfQuestionPrompt({
+      title,
+      url,
+      pages: pageImages.map((image) => image.page),
+      targetPage,
+      question,
+      outputLanguage: settings.outputLanguage
+    }),
+    settings,
+    maxTokens: 1800
+  });
+}
+
+export async function generatePdfGuide({
+  title,
+  url,
+  pageImages,
+  settings
+}: {
+  title: string;
+  url: string;
+  pageImages: PdfPageImage[];
+  settings: Settings;
+}): Promise<PdfGuideResult> {
+  const raw = await requestPdfVision({
+    pageImages,
+    prompt: buildPdfGuidePrompt({
+      title,
+      url,
+      pages: pageImages.map((image) => image.page),
+      outputLanguage: settings.outputLanguage
+    }),
+    settings,
+    maxTokens: Math.max(2600, Math.min(12000, pageImages.length * 450))
+  });
+  return parsePdfGuide(raw, pageImages.map((image) => image.page));
+}
+
+async function requestPdfVision({
+  pageImages,
+  prompt,
+  settings,
+  maxTokens
+}: {
+  pageImages: PdfPageImage[];
+  prompt: string;
+  settings: Settings;
+  maxTokens: number;
+}): Promise<string> {
+  const apiKey = getActivePdfApiKey(settings);
+  if (!apiKey) {
+    throw new Error("Missing PDF API key. Open the extension settings and add your PDF API key.");
+  }
+
+  const pdfEndpoint = settings.pdfEndpoint.trim();
+  const pdfModel = settings.pdfModel.trim();
+  if (!pdfEndpoint) {
+    throw new Error("Missing PDF endpoint. Open the extension settings and add your PDF endpoint.");
+  }
+  if (!pdfModel) {
+    throw new Error("Missing PDF parsing model. Open the extension settings and add a PDF parsing model.");
+  }
+
+  const response = await fetch(pdfEndpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json"
+    },
+    body: JSON.stringify({
+      model: pdfModel,
+      max_tokens: maxTokens,
+      temperature: 0.2,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: prompt
+            },
+            ...pageImages.map((image) => ({
+              type: "image_url",
+              image_url: {
+                url: image.dataUrl
+              }
+            }))
+          ]
+        }
+      ]
+    })
+  });
+
+  const body = (await response.json().catch(() => null)) as OpenAIResponse | null;
+  if (!response.ok) {
+    const raw = body ? JSON.stringify(body).slice(0, 4000) : "";
+    const error = new Error(body?.error?.message ?? `Model request failed with HTTP ${response.status}`) as Error & {
+      raw?: string;
+    };
+    error.raw = raw;
+    throw error;
+  }
+
+  const answer = extractResponseText(body).trim();
+  if (!answer) {
+    throw new Error("Model response did not contain choices[0].message.content.");
+  }
+
+  return stripCodeFence(answer);
+}
+
+function buildPdfGuidePrompt({
+  title,
+  url,
+  pages,
+  outputLanguage
+}: {
+  title: string;
+  url: string;
+  pages: number[];
+  outputLanguage: OutputLanguage;
+}): string {
+  const languageInstruction =
+    outputLanguage === "follow-page"
+      ? "Write in Chinese if the PDF or browser context is Chinese; otherwise use the PDF's main language."
+      : outputLanguage === "zh"
+        ? "Write in Chinese."
+        : "Write in English.";
+
+  return [
+    languageInstruction,
+    `PDF title: ${title}`,
+    `PDF URL: ${url}`,
+    `下面是 PDF 的第 ${pages.join(", ")} 页截图。PDF 的 section 单位就是页。`,
+    "不要输出整份 PDF 的总导读。必须为每一页都生成一个独立结果。",
+    "Return only valid JSON. Do not wrap it in markdown. Use exactly this shape:",
+    `{"pages":[{"page":1,"summary":"string","explanation":"string","goal":"string"}]}`,
+    `The pages array must contain exactly these page numbers, in order: ${pages.join(", ")}.`,
+    "For each page.summary, summarize only what this page says. Put the main point in **bold**.",
+    "For each page.explanation, explain what this page means in concrete quick-scan bullets. Use real markdown bullets with '\\n- ' line breaks inside the JSON string. Put the key idea in **bold**.",
+    "For each page.goal, explain this page's job in the PDF: why this page exists, what the reader should get from it, or how it moves the material forward. Be concrete and cite the page number.",
+    "If a page is mostly cover, references, or blank, still return that page and state its actual purpose instead of skipping it."
+  ].join("\n\n");
+}
+
+function buildPdfQuestionPrompt({
+  title,
+  url,
+  pages,
+  targetPage,
+  question,
+  outputLanguage
+}: {
+  title: string;
+  url: string;
+  pages: number[];
+  targetPage: number | null;
+  question: string;
+  outputLanguage: OutputLanguage;
+}): string {
+  const languageInstruction =
+    outputLanguage === "follow-page"
+      ? "Answer in the same language as the user question when possible."
+      : outputLanguage === "zh"
+        ? "Write the answer in Chinese."
+        : "Write the answer in English.";
+  const focusText = targetPage
+    ? `重点回答第 ${targetPage} 页；其他页面只作为上下文参考。`
+    : "Use all provided pages as context.";
+
+  return [
+    languageInstruction,
+    `PDF title: ${title}`,
+    `PDF URL: ${url}`,
+    `下面是 PDF 的第 ${pages.join(", ")} 页截图。请先基于截图内容理解页面，再回答用户问题；如果是多页，请按页组织要点。`,
+    focusText,
+    `用户问题：${question}`
+  ].join("\n\n");
+}
+
+function extractResponseText(body: OpenAIResponse | null): string {
+  return extractContentText(body?.choices?.[0]?.message?.content);
+}
+
+function extractContentText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(extractContentText).join("");
+  }
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const candidate = value as { text?: unknown; content?: unknown; message?: unknown };
+  if (typeof candidate.text === "string") {
+    return candidate.text;
+  }
+  if (candidate.content) {
+    return extractContentText(candidate.content);
+  }
+  if (candidate.message) {
+    return extractContentText(candidate.message);
+  }
+  return "";
 }
 
 function buildPrompt(article: ExtractedArticle, outputLanguage: OutputLanguage): string {
@@ -754,6 +981,44 @@ function parseSectionAnalysis(raw: string, expectedId: string): AnalysisSection 
   }
 
   return candidate;
+}
+
+function parsePdfGuide(raw: string, expectedPages: number[]): PdfGuideResult {
+  const cleaned = stripCodeFence(raw);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (error) {
+    const parseError = new Error(`Could not parse PDF guide JSON: ${(error as Error).message}`);
+    (parseError as Error & { raw?: string }).raw = raw;
+    throw parseError;
+  }
+
+  const candidate = parsed as PdfGuideResult;
+  const expectedSet = new Set(expectedPages);
+  const pages = Array.isArray(candidate?.pages) ? candidate.pages : [];
+  const hasValidShape =
+    pages.length === expectedPages.length &&
+    expectedPages.every((page) => pages.some((pageGuide) => pageGuide?.page === page)) &&
+    pages.every(
+      (pageGuide) =>
+        Number.isInteger(pageGuide?.page) &&
+        expectedSet.has(pageGuide.page) &&
+        typeof pageGuide.summary === "string" &&
+        typeof pageGuide.explanation === "string" &&
+        typeof pageGuide.goal === "string"
+    );
+
+  if (!hasValidShape) {
+    const shapeError = new Error("Model JSON did not include one PDF guide object for every requested page.");
+    (shapeError as Error & { raw?: string }).raw = raw;
+    throw shapeError;
+  }
+
+  const byPage = new Map(pages.map((pageGuide) => [pageGuide.page, pageGuide]));
+  return {
+    pages: expectedPages.map((page) => byPage.get(page)).filter((pageGuide): pageGuide is PdfGuideResult["pages"][number] => Boolean(pageGuide))
+  };
 }
 
 function isAnalysisResult(value: unknown): value is AnalysisResult {

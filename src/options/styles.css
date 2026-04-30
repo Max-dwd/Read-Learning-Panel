@@ -49,6 +49,23 @@ form {
   padding: 20px;
 }
 
+fieldset {
+  border: 1px solid #dde3ee;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0;
+  padding: 16px;
+}
+
+legend {
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 750;
+  padding: 0 6px;
+}
+
 .field {
   display: flex;
   flex-direction: column;

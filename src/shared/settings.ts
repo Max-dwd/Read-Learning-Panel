@@ -30,6 +30,13 @@ export const DEFAULT_SETTINGS: Settings = {
   ),
   endpoint: PROVIDER_PRESETS[0].endpoint,
   model: PROVIDER_PRESETS[0].model,
+  pdfProviderId: PROVIDER_PRESETS[0].id,
+  pdfApiKeys: {},
+  pdfProviderConfigs: Object.fromEntries(
+    PROVIDER_PRESETS.map((preset) => [preset.id, { endpoint: preset.endpoint, model: preset.model }])
+  ),
+  pdfEndpoint: PROVIDER_PRESETS[0].endpoint,
+  pdfModel: PROVIDER_PRESETS[0].model,
   outputLanguage: "follow-page"
 };
 
@@ -48,18 +55,32 @@ export async function loadSettings(): Promise<Settings> {
   };
   const detectedPreset = PROVIDER_PRESETS.find((preset) => preset.endpoint === merged.endpoint);
   const providerId = storedSettings.providerId ?? detectedPreset?.id ?? "custom";
+  const detectedPdfPreset = PROVIDER_PRESETS.find((preset) => preset.endpoint === merged.pdfEndpoint);
+  const pdfProviderId = storedSettings.pdfProviderId ?? detectedPdfPreset?.id ?? "custom";
   const apiKeys = {
     ...DEFAULT_SETTINGS.apiKeys,
     ...(storedSettings.apiKeys ?? {})
+  };
+  const pdfApiKeys = {
+    ...DEFAULT_SETTINGS.pdfApiKeys,
+    ...(storedSettings.pdfApiKeys ?? {})
   };
   const providerConfigs = {
     ...DEFAULT_SETTINGS.providerConfigs,
     ...(storedSettings.providerConfigs ?? {})
   };
+  const pdfProviderConfigs = {
+    ...DEFAULT_SETTINGS.pdfProviderConfigs,
+    ...(storedSettings.pdfProviderConfigs ?? {})
+  };
 
   providerConfigs[providerId] = {
     endpoint: merged.endpoint,
     model: merged.model
+  };
+  pdfProviderConfigs[pdfProviderId] = {
+    endpoint: merged.pdfEndpoint,
+    model: merged.pdfModel
   };
 
   if (storedSettings.apiKey?.trim() && !apiKeys[providerId]) {
@@ -69,8 +90,11 @@ export async function loadSettings(): Promise<Settings> {
   return {
     ...merged,
     providerId,
+    pdfProviderId,
     apiKeys,
-    providerConfigs
+    pdfApiKeys,
+    providerConfigs,
+    pdfProviderConfigs
   };
 }
 
@@ -80,4 +104,8 @@ export async function saveSettings(settings: Settings): Promise<void> {
 
 export function getActiveApiKey(settings: Settings): string {
   return settings.apiKeys[settings.providerId]?.trim() ?? "";
+}
+
+export function getActivePdfApiKey(settings: Settings): string {
+  return settings.pdfApiKeys[settings.pdfProviderId]?.trim() ?? "";
 }

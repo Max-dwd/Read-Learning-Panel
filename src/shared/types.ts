@@ -11,6 +11,11 @@ export type Settings = {
   providerConfigs: Record<string, ProviderConfig>;
   endpoint: string;
   model: string;
+  pdfProviderId: string;
+  pdfApiKeys: Record<string, string>;
+  pdfProviderConfigs: Record<string, ProviderConfig>;
+  pdfEndpoint: string;
+  pdfModel: string;
   outputLanguage: OutputLanguage;
 };
 
@@ -44,6 +49,17 @@ export type AnalysisResult = {
     why_read: string;
   };
   sections: AnalysisSection[];
+};
+
+export type PdfPageGuide = {
+  page: number;
+  summary: string;
+  explanation: string;
+  goal: string;
+};
+
+export type PdfGuideResult = {
+  pages: PdfPageGuide[];
 };
 
 export type SectionFollowUp = {
