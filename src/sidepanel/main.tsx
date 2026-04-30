@@ -13,10 +13,14 @@ import {
   clearHistory,
   deleteHistoryEntry,
   findHistoryEntry,
+  HISTORY_EXPORT_SCHEMA,
+  HISTORY_EXPORT_VERSION,
+  importHistoryEntry,
   loadHistory,
   saveHistoryEntry,
   updateHistoryScrollPos,
-  type HistoryEntry
+  type HistoryEntry,
+  type HistoryExportPayload
 } from "../shared/history";
 import {
   analyzeArticleProgressively,
@@ -183,7 +187,9 @@ function App() {
   const [isInCustomViewer, setIsInCustomViewer] = useState(false);
   const [followedSectionId, setFollowedSectionId] = useState<string | null>(null);
   const [followedPdfPage, setFollowedPdfPage] = useState<number | null>(null);
+  const [historyImportNotice, setHistoryImportNotice] = useState<{ type: "info" | "error"; text: string } | null>(null);
   const cacheRef = useRef(new Map<string, PageCacheEntry>());
+  const historyImportInputRef = useRef<HTMLInputElement | null>(null);
   const pdfDocumentRef = useRef<LoadedPdfDocument | null>(null);
   const currentPageKeyRef = useRef("");
   const loadVersionRef = useRef(0);
@@ -1225,6 +1231,26 @@ function App() {
   function exportConversation() {
     if (!article) return;
     const lines: string[] = [];
+    const now = Date.now();
+    const existingEntry = history.find((entry) => entry.article.url === article.url);
+    const exportEntry: HistoryEntry = {
+      id: existingEntry?.id ?? `history-export-${now}`,
+      article,
+      analysis,
+      followUps,
+      createdAt: existingEntry?.createdAt ?? now,
+      updatedAt: now,
+      scrollPos: cacheRef.current.get(currentPageKeyRef.current)?.scrollPos
+    };
+    const exportPayload: HistoryExportPayload = {
+      schema: HISTORY_EXPORT_SCHEMA,
+      version: HISTORY_EXPORT_VERSION,
+      exportedAt: now,
+      entry: exportEntry
+    };
+
+    lines.push(`<!-- learn-panel-history:v1:${encodeBase64Json(exportPayload)} -->`);
+    lines.push("");
     lines.push(`# ${article.title}`);
     lines.push(`URL: ${article.url}`);
     lines.push("");
@@ -1267,6 +1293,48 @@ function App() {
     a.download = `${article.title.slice(0, 60).replace(/[^a-zA-Z0-9\u4e00-\u9fff]+/g, "_")}_notes.md`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function openHistoryImportPicker() {
+    setHistoryImportNotice(null);
+    historyImportInputRef.current?.click();
+  }
+
+  async function handleHistoryImport(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const importedValue = parseHistoryImportText(text);
+      const nextHistory = await importHistoryEntry(importedValue);
+      setHistory(nextHistory);
+
+      const importedEntry = getImportedEntryFromValue(importedValue);
+      if (importedEntry) {
+        const savedEntry = nextHistory.find((entry) => entry.article.url === importedEntry.article.url);
+        if (savedEntry) {
+          cacheRef.current.set(getPageKey(savedEntry.article.url), {
+            article: savedEntry.article,
+            analysis: savedEntry.analysis,
+            followUps: savedEntry.followUps,
+            scrollPos: savedEntry.scrollPos
+          });
+          setHistoryImportNotice({ type: "info", text: `Imported "${savedEntry.article.title}" into history.` });
+        } else {
+          setHistoryImportNotice({ type: "info", text: "Imported snapshot into history." });
+        }
+      } else {
+        setHistoryImportNotice({ type: "info", text: "Imported snapshot into history." });
+      }
+      setViewMode("history");
+    } catch (error) {
+      setHistoryImportNotice({ type: "error", text: (error as Error).message });
+      setViewMode("history");
+    }
   }
 
   async function askSectionQuestion(sectionId: string) {
@@ -1464,11 +1532,20 @@ function App() {
       {viewMode === "history" && (
         <HistoryView
           history={history}
+          importNotice={historyImportNotice}
           onClear={() => void removeAllHistory()}
           onDelete={(entry) => void removeHistoryEntry(entry)}
+          onImport={openHistoryImportPicker}
           onRestore={(entry) => void restoreHistoryEntry(entry)}
         />
       )}
+      <input
+        ref={historyImportInputRef}
+        className="hidden-file-input"
+        type="file"
+        accept=".md,.markdown,.json,application/json,text/markdown,text/plain"
+        onChange={(event) => void handleHistoryImport(event)}
+      />
 
       {viewMode === "reader" && loadState === "loading" && <Status text="Reading this page..." />}
       {viewMode === "reader" && loadState === "error" && (
@@ -2186,13 +2263,17 @@ function PdfLanding({
 
 function HistoryView({
   history,
+  importNotice,
   onClear,
   onDelete,
+  onImport,
   onRestore
 }: {
   history: HistoryEntry[];
+  importNotice: { type: "info" | "error"; text: string } | null;
   onClear: () => void;
   onDelete: (entry: HistoryEntry) => void;
+  onImport: () => void;
   onRestore: (entry: HistoryEntry) => void;
 }) {
   return (
@@ -2202,10 +2283,16 @@ function HistoryView({
           <h2>History</h2>
           <p>{history.length} saved pages</p>
         </div>
-        <button className="secondary-button" type="button" disabled={history.length === 0} onClick={onClear}>
-          Clear
-        </button>
+        <div className="history-actions">
+          <button className="secondary-button" type="button" onClick={onImport}>
+            Import
+          </button>
+          <button className="secondary-button" type="button" disabled={history.length === 0} onClick={onClear}>
+            Clear
+          </button>
+        </div>
       </div>
+      {importNotice && <p className={`history-import-notice ${importNotice.type}`}>{importNotice.text}</p>}
       {history.length === 0 ? (
         <p className="history-empty">Analyzed pages and follow-up questions will show up here.</p>
       ) : (
@@ -2796,6 +2883,51 @@ async function sendToTab(tabId: number, request: ContentRequest): Promise<Conten
 
 async function sendToViewer(request: ContentRequest): Promise<ContentResponse> {
   return chrome.runtime.sendMessage(request);
+}
+
+function parseHistoryImportText(text: string): unknown {
+  const embeddedPayload = text.match(/<!--\s*learn-panel-history:v1:([A-Za-z0-9+/=]+)\s*-->/);
+  if (embeddedPayload?.[1]) {
+    return JSON.parse(decodeBase64Json(embeddedPayload[1]));
+  }
+
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{")) {
+    return JSON.parse(trimmed);
+  }
+
+  throw new Error("Choose a Learn Panel Markdown export or JSON history snapshot.");
+}
+
+function getImportedEntryFromValue(value: unknown): HistoryEntry | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const maybePayload = value as Partial<HistoryExportPayload>;
+  const candidate = maybePayload.schema === HISTORY_EXPORT_SCHEMA ? maybePayload.entry : value;
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+
+  const entry = candidate as Partial<HistoryEntry>;
+  const candidateArticle = entry.article as Partial<ExtractedArticle> | undefined;
+  return candidateArticle && typeof candidateArticle.url === "string" ? (entry as HistoryEntry) : null;
+}
+
+function encodeBase64Json(value: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function decodeBase64Json(value: string): string {
+  const binary = atob(value);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
 }
 
 function getPageKey(url: string): string {

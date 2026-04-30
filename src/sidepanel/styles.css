@@ -52,6 +52,10 @@ button:disabled {
   gap: 6px;
 }
 
+.hidden-file-input {
+  display: none;
+}
+
 .eyebrow {
   color: #5f6b7a;
   font-size: 12px;
@@ -451,6 +455,12 @@ h3 {
   justify-content: space-between;
 }
 
+.history-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
 .history-header p,
 .history-empty,
 .history-main small,
@@ -458,6 +468,23 @@ h3 {
   color: #526173;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.history-import-notice {
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.history-import-notice.info {
+  background: #e8f3ed;
+  color: #1f6a3d;
+}
+
+.history-import-notice.error {
+  background: #f7e5e5;
+  color: #9f1f1f;
 }
 
 .history-list {
