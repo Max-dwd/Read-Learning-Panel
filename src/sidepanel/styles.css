@@ -89,6 +89,11 @@ h3 {
   flex: 0 0 auto;
 }
 
+.follow-button.active {
+  background: #2458d3;
+  color: #fff;
+}
+
 .secondary-button,
 .danger-button {
   background: #e6ebf6;
@@ -290,7 +295,8 @@ h3 {
   overflow: hidden;
 }
 
-.pdf-page-card.active {
+.pdf-page-card.active,
+.pdf-page-card.followed {
   border-color: #2458d3;
   box-shadow: 0 0 0 2px rgba(36, 88, 211, 0.12);
 }
@@ -485,6 +491,11 @@ h3 {
 
 .section-card:hover {
   border-color: #9bb3ee;
+}
+
+.section-card.followed {
+  border-color: #2458d3;
+  box-shadow: 0 0 0 2px rgba(36, 88, 211, 0.12);
 }
 
 .section-card-header {
@@ -709,4 +720,80 @@ h3 {
   line-height: 1.55;
   margin: 0;
   white-space: pre-wrap;
+}
+
+/* ── PDF Landing ─────────────────────────────────────────── */
+
+.pdf-landing {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #dde3ee;
+  border-radius: 10px;
+  box-shadow: 0 1px 4px rgba(30, 42, 62, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 32px 20px;
+  text-align: center;
+}
+
+.pdf-landing-icon {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.pdf-landing h2 {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.pdf-landing-url {
+  color: #526173;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
+.pdf-landing-desc {
+  color: #526173;
+  font-size: 13px;
+  line-height: 1.5;
+  max-width: 280px;
+}
+
+.pdf-landing-open-button {
+  background: #2458d3;
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 650;
+  min-height: 44px;
+  padding: 0 28px;
+  width: 100%;
+}
+
+.pdf-landing-open-button:hover {
+  background: #1b47b0;
+}
+
+.pdf-landing-local-button {
+  background: #e6ebf6;
+  border: 0;
+  border-radius: 8px;
+  color: #1f3f8a;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  min-height: 38px;
+  padding: 0 20px;
+  width: 100%;
+}
+
+.pdf-landing-local-button:hover {
+  background: #d6deef;
 }

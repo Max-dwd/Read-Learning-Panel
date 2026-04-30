@@ -36,5 +36,11 @@
   ],
   "side_panel": {
     "default_path": "dist/sidepanel.html"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["dist/pdfviewer.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

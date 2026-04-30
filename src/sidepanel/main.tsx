@@ -47,6 +47,21 @@ type ViewMode = "reader" | "history";
 type DocumentMode = "article" | "pdf";
 type PdfQuestionState = "idle" | "running" | "error";
 type PdfPreviewState = "idle" | "rendering" | "ready" | "error";
+
+function isCustomPdfViewerUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === "chrome-extension:" && u.pathname.endsWith("/pdfviewer.html");
+  } catch {
+    return false;
+  }
+}
+
+function getCustomViewerUrl(pdfSourceUrl: string): string {
+  const viewerBase = chrome.runtime.getURL("dist/pdfviewer.html");
+  return `${viewerBase}?src=${encodeURIComponent(pdfSourceUrl)}`;
+}
 type PdfAnswer = {
   question: string;
   answer: string;
@@ -102,6 +117,10 @@ function App() {
   const [activeQuestionSectionId, setActiveQuestionSectionId] = useState<string | null>(null);
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const [selectionQuote, setSelectionQuote] = useState("");
+  const [followEnabled, setFollowEnabled] = useState(false);
+  const [isInCustomViewer, setIsInCustomViewer] = useState(false);
+  const [followedSectionId, setFollowedSectionId] = useState<string | null>(null);
+  const [followedPdfPage, setFollowedPdfPage] = useState<number | null>(null);
   const cacheRef = useRef(new Map<string, PageCacheEntry>());
   const pdfDocumentRef = useRef<LoadedPdfDocument | null>(null);
   const currentPageKeyRef = useRef("");
@@ -110,6 +129,7 @@ function App() {
   const analysisVersionRef = useRef(0);
   const analysisStateRef = useRef<AnalyzeState>("idle");
   const runningSectionIdRef = useRef<string | null>(null);
+  const followEnabledRef = useRef(false);
 
   useEffect(() => {
     void loadActivePage();
@@ -120,6 +140,77 @@ function App() {
   useEffect(() => {
     analysisStateRef.current = analysisState;
   }, [analysisState]);
+
+  useEffect(() => {
+    followEnabledRef.current = followEnabled;
+  }, [followEnabled]);
+
+  useEffect(() => {
+    if (!followEnabled || viewMode !== "reader" || loadState !== "ready") {
+      return;
+    }
+
+    let cancelled = false;
+    let syncing = false;
+    let lastFollowedSection: string | null = null;
+    let lastFollowedPage: number | null = null;
+
+    const syncFollowTarget = async () => {
+      if (cancelled || syncing) {
+        return;
+      }
+      syncing = true;
+      try {
+        if (documentMode === "article" && activeTabId && article) {
+          const response = await sendToTab(activeTabId, { type: "LEARN_PANEL_GET_ACTIVE_SECTION" });
+          if (!cancelled && response.ok && "activeSectionId" in response && response.activeSectionId) {
+            setFollowedPdfPage(null);
+            setFollowedSectionId(response.activeSectionId);
+            if (response.activeSectionId !== lastFollowedSection) {
+              lastFollowedSection = response.activeSectionId;
+              scrollPanelToSection(response.activeSectionId);
+            }
+          }
+        }
+
+        if (documentMode === "pdf" && pdfDocument && activeTabId) {
+          let page: number;
+          try {
+            const response = await sendToViewer({ type: "LEARN_PANEL_GET_ACTIVE_PDF_PAGE" });
+            if (response.ok && "activePage" in response) {
+              page = Math.min(response.activePage, pdfDocument.pageCount);
+            } else {
+              const tab = await getActiveTab();
+              page = Math.min(getPdfTargetPageFromUrl(tab.url), pdfDocument.pageCount);
+            }
+          } catch {
+            const tab = await getActiveTab();
+            page = Math.min(getPdfTargetPageFromUrl(tab.url), pdfDocument.pageCount);
+          }
+          if (!cancelled) {
+            setFollowedSectionId(null);
+            setFollowedPdfPage(page);
+            setPdfTargetPage(String(page));
+            if (page !== lastFollowedPage) {
+              lastFollowedPage = page;
+              scrollPanelToPdfPage(page);
+            }
+          }
+        }
+      } catch {
+        // The active tab can change or reject messages while the panel is open.
+      } finally {
+        syncing = false;
+      }
+    };
+
+    void syncFollowTarget();
+    const intervalId = window.setInterval(() => void syncFollowTarget(), 700);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [followEnabled, viewMode, loadState, documentMode, activeTabId, article, pdfDocument]);
 
   useEffect(() => {
     let timeoutId: number;
@@ -171,6 +262,21 @@ function App() {
         return;
       }
       if (changeInfo.url) {
+        const currentPdf = pdfDocumentRef.current;
+        const nextPdfSource = getPdfSourceUrl(changeInfo.url);
+        if (currentPdf && nextPdfSource === currentPdf.sourceUrl) {
+          const nextPage = Math.min(getPdfTargetPageFromUrl(changeInfo.url), currentPdf.pageCount);
+          const nextPdf = { ...currentPdf, url: changeInfo.url };
+          pdfDocumentRef.current = nextPdf;
+          setPdfDocument(nextPdf);
+          if (followEnabledRef.current) {
+            setPdfTargetPage(String(nextPage));
+            setFollowedPdfPage(nextPage);
+            requestAnimationFrame(() => scrollPanelToPdfPage(nextPage));
+          }
+          return;
+        }
+
         setArticle(null);
         setAnalysis(null);
         setFollowUps({});
@@ -191,6 +297,8 @@ function App() {
         setPdfError("");
         setPdfRawError("");
         setPdfQuestionState("idle");
+        setFollowedSectionId(null);
+        setFollowedPdfPage(null);
         setLoadState("loading");
       }
       if (changeInfo.status === "complete") {
@@ -247,6 +355,8 @@ function App() {
       setPdfPageImages([]);
       setPdfPreviewState("idle");
       setPdfPreviewError("");
+      setFollowedSectionId(null);
+      setFollowedPdfPage(null);
 
       const optimisticKey = tab.url ? getPageKey(tab.url) : "";
       if (!force && optimisticKey === currentPageKeyRef.current && analysisStateRef.current === "running") {
@@ -312,6 +422,9 @@ function App() {
   }
 
   async function loadActivePdf(tabUrl: string, loadVersion: number, force: boolean) {
+    const inCustomViewer = isCustomPdfViewerUrl(tabUrl);
+    setIsInCustomViewer(inCustomViewer);
+
     const currentPdf = pdfDocumentRef.current;
     if (!force && currentPdf?.url === tabUrl) {
       setPdfDocument(currentPdf);
@@ -337,7 +450,15 @@ function App() {
     setPdfPageImages([]);
     setPdfPreviewState("idle");
     setPdfPreviewError("");
+    setFollowedSectionId(null);
+    setFollowedPdfPage(null);
     currentPageKeyRef.current = tabUrl;
+
+    // If not in custom viewer, show landing screen without loading the PDF
+    if (!inCustomViewer) {
+      setLoadState("ready");
+      return;
+    }
 
     const loadedPdf = await loadPdfDocument(tabUrl);
     if (loadVersion !== loadVersionRef.current) {
@@ -948,6 +1069,17 @@ function App() {
           <h1>{documentMode === "pdf" ? pdfDocument?.title || "PDF document" : article?.title || "Current page"}</h1>
         </div>
         <div className="topbar-actions">
+          <button
+            className={`icon-button follow-button${followEnabled ? " active" : ""}`}
+            type="button"
+            onClick={() => {
+              setFollowEnabled((enabled) => !enabled);
+              setViewMode("reader");
+            }}
+            title="Follow the visible webpage section or PDF page"
+          >
+            跟随
+          </button>
           {(hasAnalysis || hasAnyFollowUps) && (
             <button className="icon-button" type="button" onClick={exportConversation} title="Export notes as Markdown">
               Export
@@ -987,7 +1119,23 @@ function App() {
         />
       )}
 
-      {viewMode === "reader" && documentMode === "pdf" && pdfDocument && (
+      {viewMode === "reader" && documentMode === "pdf" && !isInCustomViewer && loadState === "ready" && (
+        <PdfLanding
+          sourceUrl={getPdfSourceUrl(pdfDocumentRef.current?.url ?? currentPageKeyRef.current) ?? currentPageKeyRef.current}
+          onOpenInViewer={async (sourceUrl) => {
+            const tab = await getActiveTab();
+            const viewerUrl = getCustomViewerUrl(sourceUrl);
+            await chrome.tabs.update(tab.id, { url: viewerUrl });
+          }}
+          onOpenLocal={async () => {
+            const tab = await getActiveTab();
+            const viewerUrl = chrome.runtime.getURL("dist/pdfviewer.html");
+            await chrome.tabs.update(tab.id, { url: viewerUrl });
+          }}
+        />
+      )}
+
+      {viewMode === "reader" && documentMode === "pdf" && isInCustomViewer && pdfDocument && (
         <PdfReader
           pdfDocument={pdfDocument}
           pageRange={pdfPageRange}
@@ -998,6 +1146,7 @@ function App() {
           guideState={pdfGuideState}
           guideError={pdfGuideError}
           guideRawError={pdfGuideRawError}
+          followedPdfPage={followedPdfPage}
           pageImages={pdfPageImages}
           previewState={pdfPreviewState}
           previewError={pdfPreviewError}
@@ -1012,6 +1161,7 @@ function App() {
           onFocusPage={(page) => {
             setPdfTargetPage(String(page));
             setPdfPageRange("all");
+            void sendToViewer({ type: "LEARN_PANEL_SCROLL_TO_PDF_PAGE", page });
           }}
           onAsk={() => void askPdf()}
           onOpenSettings={() => chrome.runtime.openOptionsPage()}
@@ -1083,7 +1233,8 @@ function App() {
               return (
                 <article
                   key={section.id}
-                  className="section-card"
+                  className={`section-card${followedSectionId === section.id ? " followed" : ""}`}
+                  data-learn-panel-section-card-id={section.id}
                   onClick={() => void jumpToSection(section.id)}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -1210,6 +1361,7 @@ function PdfReader({
   guideState,
   guideError,
   guideRawError,
+  followedPdfPage,
   pageImages,
   previewState,
   previewError,
@@ -1234,6 +1386,7 @@ function PdfReader({
   guideState: PdfQuestionState;
   guideError: string;
   guideRawError: string;
+  followedPdfPage: number | null;
   pageImages: PdfPageImage[];
   previewState: PdfPreviewState;
   previewError: string;
@@ -1352,20 +1505,25 @@ function PdfReader({
           {pageImages.map((image) => {
             const pageGuide = guideByPage.get(image.page);
             return (
-              <article className={`pdf-page-card${image.page === focusedPage ? " active" : ""}`} key={image.page}>
+              <article
+                className={`pdf-page-card${image.page === focusedPage ? " active" : ""}${image.page === followedPdfPage ? " followed" : ""}`}
+                data-learn-panel-pdf-page={image.page}
+                key={image.page}
+              >
                 <button type="button" className="pdf-page-header" onClick={() => onFocusPage(image.page)}>
                   <span>Page {image.page}</span>
                   {image.page === focusedPage && <strong>Focus</strong>}
                 </button>
-                <button type="button" className="pdf-page-image-button" onClick={() => onFocusPage(image.page)}>
-                  <img src={image.dataUrl} alt={`PDF page ${image.page}`} loading="lazy" />
-                </button>
-                {pageGuide && (
+                {pageGuide ? (
                   <div className="pdf-page-guide">
                     <InfoBlock title="Summary" body={pageGuide.summary} />
                     <InfoBlock title="Explanation" body={pageGuide.explanation} />
                     <InfoBlock title="Goal" body={pageGuide.goal} />
                   </div>
+                ) : (
+                  <button type="button" className="pdf-page-image-button" onClick={() => onFocusPage(image.page)}>
+                    <img src={image.dataUrl} alt={`PDF page ${image.page}`} loading="lazy" />
+                  </button>
                 )}
               </article>
             );
@@ -1389,6 +1547,39 @@ function PdfReader({
         </section>
       )}
     </>
+  );
+}
+
+function PdfLanding({
+  sourceUrl,
+  onOpenInViewer,
+  onOpenLocal
+}: {
+  sourceUrl: string;
+  onOpenInViewer: (sourceUrl: string) => void;
+  onOpenLocal: () => void;
+}) {
+  return (
+    <section className="pdf-landing">
+      <div className="pdf-landing-icon">📄</div>
+      <h2>PDF Detected</h2>
+      <p className="pdf-landing-url">{sourceUrl}</p>
+      <p className="pdf-landing-desc">Open this PDF in the custom viewer for full page-following and analysis support.</p>
+      <button
+        className="pdf-landing-open-button"
+        type="button"
+        onClick={() => onOpenInViewer(sourceUrl)}
+      >
+        Open in PDF Viewer
+      </button>
+      <button
+        className="pdf-landing-local-button"
+        type="button"
+        onClick={onOpenLocal}
+      >
+        Open Local PDF
+      </button>
+    </section>
   );
 }
 
@@ -1660,6 +1851,18 @@ function InlineMarkup({ text }: { text: string }) {
   );
 }
 
+function scrollPanelToSection(sectionId: string) {
+  const target = document.querySelector<HTMLElement>(
+    `[data-learn-panel-section-card-id="${CSS.escape(sectionId)}"]`
+  );
+  target?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function scrollPanelToPdfPage(page: number) {
+  const target = document.querySelector<HTMLElement>(`[data-learn-panel-pdf-page="${page}"]`);
+  target?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 async function getActiveTab(): Promise<chrome.tabs.Tab & { id: number }> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) {
@@ -1670,6 +1873,10 @@ async function getActiveTab(): Promise<chrome.tabs.Tab & { id: number }> {
 
 async function sendToTab(tabId: number, request: ContentRequest): Promise<ContentResponse> {
   return chrome.tabs.sendMessage(tabId, request);
+}
+
+async function sendToViewer(request: ContentRequest): Promise<ContentResponse> {
+  return chrome.runtime.sendMessage(request);
 }
 
 function getPageKey(url: string): string {

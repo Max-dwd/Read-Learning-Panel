@@ -71,12 +71,17 @@ export type SectionFollowUp = {
 export type ContentRequest =
   | { type: "LEARN_PANEL_GET_ARTICLE" }
   | { type: "LEARN_PANEL_SCROLL_TO_SECTION"; sectionId: string }
-  | { type: "LEARN_PANEL_GET_SELECTION" };
+  | { type: "LEARN_PANEL_GET_SELECTION" }
+  | { type: "LEARN_PANEL_GET_ACTIVE_SECTION" }
+  | { type: "LEARN_PANEL_GET_ACTIVE_PDF_PAGE" }
+  | { type: "LEARN_PANEL_SCROLL_TO_PDF_PAGE"; page: number };
 
 export type ContentResponse =
   | { ok: true; article: ExtractedArticle }
   | { ok: true }
   | { ok: true; selection: string }
+  | { ok: true; activeSectionId: string | null }
+  | { ok: true; activePage: number }
   | { ok: false; error: string };
 
 export type AnalyzeError = {

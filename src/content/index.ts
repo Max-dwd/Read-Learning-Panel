@@ -2,6 +2,7 @@ import type { ContentRequest, ContentResponse, ExtractedArticle, ExtractedSectio
 
 const SECTION_ATTR = "data-learn-panel-section-id";
 const HIGHLIGHT_CLASS = "learn-panel-section-highlight";
+let extractedSectionIds: string[] = [];
 
 chrome.runtime.onMessage.addListener(
   (request: ContentRequest, _sender, sendResponse: (response: ContentResponse) => void) => {
@@ -23,6 +24,11 @@ chrome.runtime.onMessage.addListener(
         return false;
       }
 
+      if (request.type === "LEARN_PANEL_GET_ACTIVE_SECTION") {
+        sendResponse({ ok: true, activeSectionId: getActiveSectionId() });
+        return false;
+      }
+
       sendResponse({ ok: false, error: "Unknown content request." });
       return false;
     } catch (error) {
@@ -39,6 +45,7 @@ function extractArticle(): ExtractedArticle {
   const title = getTitle(root);
   const text = normalizeText(root.innerText);
   const sections = extractSections(root);
+  extractedSectionIds = sections.map((section) => section.id);
 
   return {
     title,
@@ -154,6 +161,38 @@ function scrollToSection(sectionId: string): void {
   window.setTimeout(() => target.classList.remove(HIGHLIGHT_CLASS), 1800);
 }
 
+function getActiveSectionId(): string | null {
+  if (extractedSectionIds.length === 0) {
+    extractedSectionIds = extractSections(findArticleRoot()).map((section) => section.id);
+  }
+
+  const targets = extractedSectionIds
+    .map((id) => ({
+      id,
+      element: document.querySelector<HTMLElement>(`[${SECTION_ATTR}="${CSS.escape(id)}"]`)
+    }))
+    .filter((target): target is { id: string; element: HTMLElement } => target.element !== null && isTrackable(target.element));
+
+  if (targets.length === 0) {
+    return null;
+  }
+
+  const anchorY = Math.min(220, Math.max(80, window.innerHeight * 0.28));
+  let lastAbove: string | null = null;
+  let firstBelow: string | null = null;
+
+  for (const target of targets) {
+    const rect = target.element.getBoundingClientRect();
+    if (rect.top <= anchorY) {
+      lastAbove = target.id;
+    } else if (!firstBelow) {
+      firstBelow = target.id;
+    }
+  }
+
+  return lastAbove ?? firstBelow ?? targets[0].id;
+}
+
 function ensureHighlightStyle(): void {
   if (document.getElementById("learn-panel-highlight-style")) {
     return;
@@ -200,6 +239,11 @@ function scoreTextDensity(element: HTMLElement): number {
 function isVisible(element: HTMLElement): boolean {
   const style = window.getComputedStyle(element);
   return style.display !== "none" && style.visibility !== "hidden" && element.offsetParent !== null;
+}
+
+function isTrackable(element: HTMLElement): boolean {
+  const style = window.getComputedStyle(element);
+  return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
 }
 
 function normalizeText(value: string): string {
