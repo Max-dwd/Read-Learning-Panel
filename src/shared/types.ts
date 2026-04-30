@@ -2,7 +2,7 @@ export type OutputLanguage = "follow-page" | "zh" | "en";
 export type PdfAnalysisMode = "visual" | "deep";
 export type DatalabParseMode = "fast" | "balanced" | "accurate";
 
-export const DEEP_PDF_GEOMETRY_VERSION = 3;
+export const DEEP_PDF_GEOMETRY_VERSION = 4;
 
 export type ProviderConfig = {
   endpoint: string;
@@ -79,6 +79,11 @@ export type PdfGuideResult = {
   pages: PdfPageGuide[];
 };
 
+export type PdfSelectionReference = {
+  text: string;
+  imageDataUrl?: string;
+};
+
 export type PdfPoint = [number, number];
 export type PdfBoundingBox = [number, number, number, number];
 export type PdfPolygon = PdfPoint[];
@@ -138,12 +143,15 @@ export type ContentRequest =
       blocks: DeepPdfBlock[];
       pageBboxes?: Record<number, PdfBoundingBox>;
     }
-  | { type: "LEARN_VIEWER_FOCUS_PDF_SECTION"; sectionId: string };
+  | { type: "LEARN_PANEL_REMOVE_PDF_SELECTION_REFERENCE"; referenceLabel: string }
+  | { type: "LEARN_VIEWER_FOCUS_PDF_SECTION"; sectionId: string }
+  | { type: "LEARN_VIEWER_PDF_SELECTION_CHANGED"; sectionId: string; selection: string; selectionImageDataUrl?: string }
+  | { type: "LEARN_VIEWER_USE_PDF_SELECTION"; sectionId: string; selection: string; selectionImageDataUrl?: string };
 
 export type ContentResponse =
   | { ok: true; article: ExtractedArticle }
   | { ok: true }
-  | { ok: true; selection: string }
+  | { ok: true; selection: string; selectionImageDataUrl?: string }
   | { ok: true; activeSectionId: string | null }
   | { ok: true; activePage: number }
   | { ok: false; error: string };

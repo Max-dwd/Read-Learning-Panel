@@ -45,6 +45,7 @@ type RawDatalabBlockWithPage = {
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 90;
+const PDF_PAGE_SECTION_PREFIX = "pdf-page-";
 
 export async function parsePdfWithDatalab(
   pdfDocument: LoadedPdfDocument,
@@ -411,10 +412,10 @@ function buildSectionsFromBlocks(blocks: DeepPdfBlock[], pdfDocument: LoadedPdfD
   if (blocks.length === 0) {
     return [
       {
-        id: "deep-pdf-section-1",
-        title: pdfDocument.title,
+        id: `${PDF_PAGE_SECTION_PREFIX}1`,
+        title: "Page 1",
         level: 2,
-        text: "Datalab returned no text blocks for this PDF.",
+        text: "Datalab returned no text blocks for this PDF page.",
         pageStart: 1,
         pageEnd: pdfDocument.pageCount,
         blocks: []
@@ -422,73 +423,46 @@ function buildSectionsFromBlocks(blocks: DeepPdfBlock[], pdfDocument: LoadedPdfD
     ];
   }
 
-  const sections: DeepPdfSection[] = [];
-  let current: DeepPdfSection | null = null;
-
+  const blocksByPage = new Map<number, DeepPdfBlock[]>();
   for (const block of blocks) {
-    if (!current || isHeadingBlock(block)) {
-      if (current) {
-        current.text = buildSectionText(current.blocks);
-        current.pageEnd = current.blocks.at(-1)?.page ?? current.pageStart;
-        sections.push(current);
-      }
-
-      current = {
-        id: `deep-pdf-section-${sections.length + 1}`,
-        title: isHeadingBlock(block) ? firstLine(block.text) : `Page ${block.page}`,
-        level: isHeadingBlock(block) ? inferHeadingLevel(block) : 2,
-        text: "",
-        pageStart: block.page,
-        pageEnd: block.page,
-        blocks: [block]
-      };
-      continue;
-    }
-
-    current.blocks.push(block);
+    const pageBlocks = blocksByPage.get(block.page) ?? [];
+    pageBlocks.push(block);
+    blocksByPage.set(block.page, pageBlocks);
   }
 
-  if (current) {
-    current.text = buildSectionText(current.blocks);
-    current.pageEnd = current.blocks.at(-1)?.page ?? current.pageStart;
-    sections.push(current);
-  }
-
-  return mergeTinySections(sections);
-}
-
-function mergeTinySections(sections: DeepPdfSection[]): DeepPdfSection[] {
-  const merged: DeepPdfSection[] = [];
-  for (const section of sections) {
-    const previous = merged.at(-1);
-    if (previous && section.text.length < 240) {
-      previous.blocks.push(...section.blocks);
-      previous.text = buildSectionText(previous.blocks);
-      previous.pageEnd = Math.max(previous.pageEnd, section.pageEnd);
-      continue;
-    }
-    merged.push({ ...section });
-  }
-
-  return merged.map((section, index) => ({
-    ...section,
-    id: `deep-pdf-section-${index + 1}`
-  }));
+  return [...blocksByPage.entries()]
+    .sort(([pageA], [pageB]) => pageA - pageB)
+    .map(([page, pageBlocks]) => ({
+      id: `${PDF_PAGE_SECTION_PREFIX}${page}`,
+      title: `Page ${page}`,
+      level: 2 as const,
+      text: buildSectionText(pageBlocks),
+      pageStart: page,
+      pageEnd: page,
+      blocks: pageBlocks
+    }));
 }
 
 function buildSectionText(blocks: DeepPdfBlock[]): string {
+  const typeCounts = new Map<string, number>();
   return blocks
-    .map((block) => [`[Page ${block.page} | ${block.type}]`, block.text].join("\n"))
+    .map((block) => {
+      const blockType = formatBlockReferenceType(block.type);
+      const typeIndex = (typeCounts.get(blockType) ?? 0) + 1;
+      typeCounts.set(blockType, typeIndex);
+      const headingMarker = isHeadingBlock(block) ? " | heading" : "";
+      return [`[Page ${block.page} | ${blockType} ${typeIndex}${headingMarker}]`, block.text].join("\n");
+    })
     .join("\n\n")
     .slice(0, 12000);
 }
 
-function isHeadingBlock(block: DeepPdfBlock): boolean {
-  return /heading|title|section/i.test(block.type) && block.text.trim().length < 220;
+function formatBlockReferenceType(type: string): string {
+  return type.trim().replace(/\s+/g, " ") || "Text";
 }
 
-function inferHeadingLevel(block: DeepPdfBlock): 2 | 3 {
-  return /sub|h3|third/i.test(block.type) ? 3 : 2;
+function isHeadingBlock(block: DeepPdfBlock): boolean {
+  return /heading|title|section/i.test(block.type) && block.text.trim().length < 220;
 }
 
 function readPage(block: RawDatalabBlock): number | null {
@@ -575,10 +549,6 @@ function stripHtml(html: string): string {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .trim();
-}
-
-function firstLine(text: string): string {
-  return text.split(/\r?\n/).map((line) => line.trim()).find(Boolean)?.slice(0, 120) || "Untitled section";
 }
 
 function safePdfFilename(title: string): string {

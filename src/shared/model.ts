@@ -5,6 +5,7 @@ import type {
   ExtractedSection,
   OutputLanguage,
   PdfGuideResult,
+  PdfSelectionReference,
   SectionFollowUp,
   Settings
 } from "./types";
@@ -496,6 +497,7 @@ export async function answerPdfQuestion({
   pageImages,
   targetPage,
   question,
+  selectionReference,
   settings
 }: {
   title: string;
@@ -503,16 +505,19 @@ export async function answerPdfQuestion({
   pageImages: PdfPageImage[];
   targetPage: number | null;
   question: string;
+  selectionReference?: PdfSelectionReference;
   settings: Settings;
 }): Promise<string> {
   return requestPdfVision({
     pageImages,
+    supplementalImageDataUrls: selectionReference?.imageDataUrl ? [selectionReference.imageDataUrl] : [],
     prompt: buildPdfQuestionPrompt({
       title,
       url,
       pages: pageImages.map((image) => image.page),
       targetPage,
       question,
+      selectionReference,
       outputLanguage: settings.outputLanguage
     }),
     settings,
@@ -547,11 +552,13 @@ export async function generatePdfGuide({
 
 async function requestPdfVision({
   pageImages,
+  supplementalImageDataUrls = [],
   prompt,
   settings,
   maxTokens
 }: {
   pageImages: PdfPageImage[];
+  supplementalImageDataUrls?: string[];
   prompt: string;
   settings: Settings;
   maxTokens: number;
@@ -593,6 +600,12 @@ async function requestPdfVision({
               type: "image_url",
               image_url: {
                 url: image.dataUrl
+              }
+            })),
+            ...supplementalImageDataUrls.map((dataUrl) => ({
+              type: "image_url",
+              image_url: {
+                url: dataUrl
               }
             }))
           ]
@@ -646,9 +659,10 @@ function buildPdfGuidePrompt({
     "Return only valid JSON. Do not wrap it in markdown. Use exactly this shape:",
     `{"pages":[{"page":1,"summary":"string","explanation":"string","goal":"string"}]}`,
     `The pages array must contain exactly these page numbers, in order: ${pages.join(", ")}.`,
+    "Do not start any summary, explanation, or goal with a page label such as 'Page 1:' or '第 1 页：'; the UI already shows the page number.",
     "For each page.summary, summarize only what this page says. Put the main point in **bold**.",
     "For each page.explanation, explain what this page means in concrete quick-scan bullets. Use real markdown bullets with '\\n- ' line breaks inside the JSON string. Put the key idea in **bold**.",
-    "For each page.goal, explain this page's job in the PDF: why this page exists, what the reader should get from it, or how it moves the material forward. Be concrete and cite the page number.",
+    "For each page.goal, explain this page's job in the PDF: why this page exists, what the reader should get from it, or how it moves the material forward. Be concrete without repeating the page number.",
     "If a page is mostly cover, references, or blank, still return that page and state its actual purpose instead of skipping it."
   ].join("\n\n");
 }
@@ -659,6 +673,7 @@ function buildPdfQuestionPrompt({
   pages,
   targetPage,
   question,
+  selectionReference,
   outputLanguage
 }: {
   title: string;
@@ -666,6 +681,7 @@ function buildPdfQuestionPrompt({
   pages: number[];
   targetPage: number | null;
   question: string;
+  selectionReference?: PdfSelectionReference;
   outputLanguage: OutputLanguage;
 }): string {
   const languageInstruction =
@@ -683,9 +699,13 @@ function buildPdfQuestionPrompt({
     `PDF title: ${title}`,
     `PDF URL: ${url}`,
     `下面是 PDF 的第 ${pages.join(", ")} 页截图。请先基于截图内容理解页面，再回答用户问题；如果是多页，请按页组织要点。`,
+    selectionReference?.imageDataUrl
+      ? "用户引用了一个框选区域；完整页截图之后还附带了该框选区域的小截图。回答时优先参考这个小截图，再结合整页上下文。"
+      : "",
+    selectionReference?.text ? `引用内容：\n${selectionReference.text}` : "",
     focusText,
     `用户问题：${question}`
-  ].join("\n\n");
+  ].filter(Boolean).join("\n\n");
 }
 
 function extractResponseText(body: OpenAIResponse | null): string {
@@ -832,10 +852,13 @@ function buildDeepPdfProgressivePrompt(article: ExtractedArticle, outputLanguage
     basePrompt,
     "",
     "PDF deep-analysis input rules:",
-    "This PDF was parsed into structured blocks by Datalab Marker. Section text includes page markers and block types such as heading, text, table, figure, or equation.",
-    "Use the parsed text as the source of truth. When a section contains tables, figures, equations, or captions, explain their learning value instead of only restating nearby text.",
-    "For section.interpretation, be more detailed than a page-level visual scan: connect the section's claims, definitions, evidence, and figures into concrete learning takeaways.",
-    "For section.role_in_article, explain how this parsed section advances the PDF document as a whole."
+    "This PDF was parsed into structured blocks by Datalab Marker. Each input section is exactly one PDF page, not one heading or subsection.",
+    "Section text contains that page's blocks in reading order. Blocks may be headings, paragraphs, lists, tables, figures, equations, or captions.",
+    "Analyze the page as the main unit. Do not treat H3/H4-like blocks as separate document sections.",
+    "Do not start section.summary, section.interpretation, or section.role_in_article with a page label such as 'Page 1:' or '第 1 页：'; the UI already shows the page number.",
+    "For section.summary, summarize what this page says as a whole.",
+    "For section.interpretation, explain the relationships among blocks on the same page: how definitions, claims, evidence, tables, figures, equations, and captions support or contrast each other.",
+    "For section.role_in_article, explain how this page advances the PDF document as a whole across all parsed pages."
   ].join("\n");
 }
 

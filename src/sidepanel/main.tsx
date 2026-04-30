@@ -60,6 +60,7 @@ import type {
   ExtractedArticle,
   PdfAnalysisMode,
   PdfGuideResult,
+  PdfSelectionReference,
   SectionFollowUp,
   Settings
 } from "../shared/types";
@@ -148,6 +149,8 @@ function App() {
   const [pdfPageRange, setPdfPageRange] = useState("all");
   const [pdfTargetPage, setPdfTargetPage] = useState("1");
   const [pdfQuestion, setPdfQuestion] = useState("");
+  const [pdfSelectionQuote, setPdfSelectionQuote] = useState("");
+  const [pdfSelectionImageDataUrl, setPdfSelectionImageDataUrl] = useState("");
   const [pdfQuestionState, setPdfQuestionState] = useState<PdfQuestionState>("idle");
   const [pdfError, setPdfError] = useState("");
   const [pdfRawError, setPdfRawError] = useState("");
@@ -189,6 +192,7 @@ function App() {
   const runningSectionIdRef = useRef<string | null>(null);
   const followEnabledRef = useRef(false);
   const currentArticleUrlRef = useRef<string | null>(null);
+  const activeQuestionSectionIdRef = useRef<string | null>(null);
   const scrollSaveSuppressionTokenRef = useRef(0);
   const nextScrollSaveSuppressionTokenRef = useRef(1);
   const loadingScrollSuppressionTokenRef = useRef<number | null>(null);
@@ -212,18 +216,40 @@ function App() {
   }, [article?.url]);
 
   useEffect(() => {
+    activeQuestionSectionIdRef.current = activeQuestionSectionId;
+  }, [activeQuestionSectionId]);
+
+  useEffect(() => {
     const handleViewerMessage = (
       request: ContentRequest,
       _sender: chrome.runtime.MessageSender,
       sendResponse: (response: ContentResponse) => void
     ) => {
-      if (request.type !== "LEARN_VIEWER_FOCUS_PDF_SECTION") {
+      if (
+        request.type !== "LEARN_VIEWER_FOCUS_PDF_SECTION" &&
+        request.type !== "LEARN_VIEWER_USE_PDF_SELECTION" &&
+        request.type !== "LEARN_VIEWER_PDF_SELECTION_CHANGED"
+      ) {
+        return false;
+      }
+
+      if (request.type === "LEARN_VIEWER_PDF_SELECTION_CHANGED") {
+        if (activeQuestionSectionIdRef.current === request.sectionId) {
+          setPdfSelectionQuote(request.selection);
+          setPdfSelectionImageDataUrl(request.selectionImageDataUrl ?? "");
+        }
+        sendResponse({ ok: true });
         return false;
       }
 
       setViewMode("reader");
       setPdfAnalysisMode("deep");
       setActiveDeepPdfSectionId(request.sectionId);
+      if (request.type === "LEARN_VIEWER_USE_PDF_SELECTION") {
+        setActiveQuestionSectionId(request.sectionId);
+        setPdfSelectionQuote(request.selection);
+        setPdfSelectionImageDataUrl(request.selectionImageDataUrl ?? "");
+      }
       requestAnimationFrame(() => scrollPanelToSection(request.sectionId));
       sendResponse({ ok: true });
       return false;
@@ -985,7 +1011,12 @@ function App() {
       return;
     }
 
-    const question = normalizeQuestion(pdfQuestion);
+    const liveSelection = await grabPageSelectionReference();
+    const selectedReference: PdfSelectionReference = liveSelection.text
+      ? liveSelection
+      : { text: pdfSelectionQuote, imageDataUrl: pdfSelectionImageDataUrl || undefined };
+    const selectedReferenceText = normalizeQuestion(selectedReference.text);
+    const question = normalizeQuestion(selectedReferenceText ? `> ${selectedReferenceText}\n\n${pdfQuestion}` : pdfQuestion);
     if (!question) {
       return;
     }
@@ -1014,6 +1045,7 @@ function App() {
         pageImages,
         targetPage,
         question,
+        selectionReference: selectedReferenceText ? selectedReference : undefined,
         settings: currentSettings
       });
 
@@ -1028,6 +1060,8 @@ function App() {
         }
       ]);
       setPdfQuestion("");
+      setPdfSelectionQuote("");
+      setPdfSelectionImageDataUrl("");
       setPdfQuestionState("idle");
     } catch (error) {
       const typedError = error as Error & { raw?: string };
@@ -1035,6 +1069,29 @@ function App() {
       setPdfError(typedError.message);
       setPdfRawError(typedError.raw ?? "");
     }
+  }
+
+  async function usePdfSelectionReference() {
+    const selection = await grabPageSelectionReference();
+    if (selection.text) {
+      setPdfSelectionQuote(selection.text);
+      setPdfSelectionImageDataUrl(selection.imageDataUrl ?? "");
+      const pageMatch = selection.text.match(/^\[Page\s+(\d+)/m);
+      const page = pageMatch ? Number(pageMatch[1]) : null;
+      if (page) {
+        setActiveQuestionSectionId(`${PDF_PAGE_SECTION_PREFIX}${page}`);
+        requestAnimationFrame(() => scrollPanelToSection(`${PDF_PAGE_SECTION_PREFIX}${page}`));
+      }
+    }
+  }
+
+  function removePdfSelectionReference(referenceLabel: string) {
+    const nextQuote = removePdfQuoteReference(pdfSelectionQuote, referenceLabel);
+    setPdfSelectionQuote(nextQuote);
+    if (!nextQuote) {
+      setPdfSelectionImageDataUrl("");
+    }
+    void sendToViewer({ type: "LEARN_PANEL_REMOVE_PDF_SELECTION_REFERENCE", referenceLabel }).catch(() => undefined);
   }
 
   async function runPdfGuide() {
@@ -1093,7 +1150,7 @@ function App() {
       setDeepPdfParse(result);
       setDeepPdfParseState("done");
       setDeepPdfParseStatus(
-        `Parsed ${result.sections.length} sections from ${result.blocks.length} blocks${datalabPageRange ? ` on pages ${formatPages(pages)}` : ""}.`
+        `Parsed ${result.blocks.length} blocks into ${result.sections.length} pages${datalabPageRange ? ` on pages ${formatPages(pages)}` : ""}.`
       );
       await saveDeepPdfParse(loadedPdf.sourceUrl, datalabPageRange, result);
       const parsedArticle = buildDeepPdfArticle(result);
@@ -1151,16 +1208,10 @@ function App() {
       return;
     }
 
-    void loadSavedDeepPdfForCurrentRange(loadedPdf);
-    setAnalysis(null);
-    setAnalysisState("idle");
-    setSectionAnalyzeState({});
-    setSectionAnalyzeErrors({});
-    setAnalysisError("");
-    setRawError("");
+    void loadSavedDeepPdfForCurrentRange(loadedPdf, { clearOnMiss: true });
   }
 
-  async function loadSavedDeepPdfForCurrentRange(loadedPdf: LoadedPdfDocument) {
+  async function loadSavedDeepPdfForCurrentRange(loadedPdf: LoadedPdfDocument, options: { clearOnMiss?: boolean } = {}) {
     try {
       const pages = parsePdfPageRange(pdfPageRange, loadedPdf.pageCount);
       const datalabPageRange = toDatalabPageRange(pages, loadedPdf.pageCount);
@@ -1170,9 +1221,19 @@ function App() {
         setDeepPdfParseState("done");
         setDeepPdfParseStatus(`Loaded saved deep parse${datalabPageRange ? ` for pages ${formatPages(pages)}` : ""}.`);
         await applyDeepPdfParse(saved, { restoreSaved: true });
+        return;
       }
     } catch {
       // Keep the panel usable if the range input is temporarily invalid.
+    }
+
+    if (options.clearOnMiss) {
+      setAnalysis(null);
+      setAnalysisState("idle");
+      setSectionAnalyzeState({});
+      setSectionAnalyzeErrors({});
+      setAnalysisError("");
+      setRawError("");
     }
   }
 
@@ -1303,16 +1364,23 @@ function App() {
   }
 
   async function grabPageSelection(): Promise<string> {
+    return (await grabPageSelectionReference()).text;
+  }
+
+  async function grabPageSelectionReference(): Promise<PdfSelectionReference> {
     try {
       const tab = await getActiveTab();
       const response = await sendToTab(tab.id, { type: "LEARN_PANEL_GET_SELECTION" });
       if (response.ok && "selection" in response) {
-        return response.selection;
+        return {
+          text: response.selection,
+          imageDataUrl: response.selectionImageDataUrl
+        };
       }
     } catch {
       // ignore
     }
-    return "";
+    return { text: "" };
   }
 
   async function openQuestionWithSelection(sectionId: string) {
@@ -1520,6 +1588,129 @@ function App() {
     }
   }
 
+  async function askPdfCardQuestion(sectionId: string) {
+    if (!article || !settings) {
+      return;
+    }
+
+    let draft = questionDrafts[sectionId] ?? "";
+    let displayDraft = draft;
+    if (pdfSelectionQuote && activeQuestionSectionId === sectionId) {
+      draft = `> ${pdfSelectionQuote}\n\n${draft}`;
+      displayDraft = `> ${formatPdfQuoteTitle(pdfSelectionQuote)}\n\n${displayDraft}`;
+    }
+    const question = normalizeQuestion(draft);
+    const displayQuestion = normalizeQuestion(displayDraft);
+    if (!question) {
+      return;
+    }
+
+    const section = article.sections.find((candidate) => candidate.id === sectionId);
+    if (!section) {
+      return;
+    }
+
+    const pageKey = currentPageKeyRef.current;
+    const currentSettings = await loadSettings();
+    setSettings(currentSettings);
+    const existingFollowUps = followUps[sectionId] ?? [];
+    const cached = existingFollowUps.find((item) => normalizeQuestion(item.question) === displayQuestion);
+    if (cached) {
+      setQuestionDrafts((drafts) => ({ ...drafts, [sectionId]: "" }));
+      return;
+    }
+
+    setPendingQuestions((pending) => ({ ...pending, [sectionId]: true }));
+    setQuestionErrors((errors) => ({ ...errors, [sectionId]: "" }));
+
+    try {
+      let answer = "";
+      if (article.siteName === "PDF Deep") {
+        answer = await answerSectionQuestion({
+          article,
+          section,
+          sectionAnalysis: sectionAnalysis.get(sectionId),
+          priorFollowUps: existingFollowUps,
+          question,
+          settings: currentSettings
+        });
+      } else {
+        const loadedPdf = pdfDocumentRef.current;
+        const page = getPdfPageFromSectionId(sectionId);
+        if (!loadedPdf || !page) {
+          throw new Error("Could not find the PDF page for this card.");
+        }
+        const pageImages = await getPdfImagesForPages(loadedPdf, [page]);
+        answer = await answerPdfQuestion({
+          title: loadedPdf.title,
+          url: loadedPdf.sourceUrl,
+          pageImages,
+          targetPage: page,
+          question,
+          selectionReference:
+            pdfSelectionQuote && activeQuestionSectionId === sectionId
+              ? { text: pdfSelectionQuote, imageDataUrl: pdfSelectionImageDataUrl || undefined }
+              : undefined,
+          settings: currentSettings
+        });
+      }
+
+      const followUp: SectionFollowUp = {
+        question: displayQuestion,
+        answer,
+        createdAt: Date.now()
+      };
+      const nextFollowUps = {
+        ...followUps,
+        [sectionId]: [...existingFollowUps, followUp]
+      };
+      const existing = cacheRef.current.get(pageKey);
+      cacheRef.current.set(pageKey, {
+        article,
+        analysis,
+        followUps: nextFollowUps,
+        scrollPos: cacheRef.current.get(pageKey)?.scrollPos
+      });
+      setHistory(await saveHistoryEntry({
+        article,
+        analysis,
+        followUps: nextFollowUps,
+        scrollPos: cacheRef.current.get(pageKey)?.scrollPos
+      }));
+
+      if (currentPageKeyRef.current === pageKey) {
+        setFollowUps(nextFollowUps);
+        setQuestionDrafts((drafts) => ({ ...drafts, [sectionId]: "" }));
+        if (pdfSelectionQuote && activeQuestionSectionId === sectionId) {
+          setPdfSelectionQuote("");
+          setPdfSelectionImageDataUrl("");
+        }
+      } else if (existing) {
+        cacheRef.current.set(pageKey, {
+          ...existing,
+          followUps: nextFollowUps
+        });
+      }
+    } catch (error) {
+      if (currentPageKeyRef.current === pageKey) {
+        setQuestionErrors((errors) => ({ ...errors, [sectionId]: (error as Error).message }));
+      }
+    } finally {
+      if (currentPageKeyRef.current === pageKey) {
+        setPendingQuestions((pending) => ({ ...pending, [sectionId]: false }));
+      }
+    }
+  }
+
+  async function openPdfCardQuestion(sectionId: string) {
+    setActiveQuestionSectionId(sectionId);
+    const selection = await grabPageSelectionReference();
+    if (selection.text) {
+      setPdfSelectionQuote(selection.text);
+      setPdfSelectionImageDataUrl(selection.imageDataUrl ?? "");
+    }
+  }
+
   async function restoreHistoryEntry(entry: HistoryEntry) {
     if (entry.article.siteName === "PDF" || entry.article.siteName === "PDF Deep") {
       setViewMode("reader");
@@ -1687,6 +1878,8 @@ function App() {
           pageRange={pdfPageRange}
           targetPage={pdfTargetPage}
           question={pdfQuestion}
+          selectionQuote={pdfSelectionQuote}
+          selectionImageDataUrl={pdfSelectionImageDataUrl}
           answers={pdfAnswers}
           guide={pdfGuide}
           guideState={pdfGuideState}
@@ -1702,12 +1895,17 @@ function App() {
           deepPdfParseRawError={deepPdfParseRawError}
           activeDeepPdfSectionId={activeDeepPdfSectionId}
           showAllDeepPdfBoundingBoxes={showAllDeepPdfBoundingBoxes}
+          activeQuestionSectionId={activeQuestionSectionId}
           analysis={analysis}
           analysisState={analysisState}
           analysisError={analysisError}
           rawAnalysisError={rawError}
           sectionAnalyzeState={sectionAnalyzeState}
           sectionAnalyzeErrors={sectionAnalyzeErrors}
+          followUps={followUps}
+          questionDrafts={questionDrafts}
+          pendingQuestions={pendingQuestions}
+          questionErrors={questionErrors}
           previewState={pdfPreviewState}
           previewError={pdfPreviewError}
           state={pdfQuestionState}
@@ -1718,6 +1916,17 @@ function App() {
           onPageRangeChange={setPdfPageRange}
           onTargetPageChange={setPdfTargetPage}
           onQuestionChange={setPdfQuestion}
+          onQuestionDraftChange={(sectionId, value) =>
+            setQuestionDrafts((drafts) => ({ ...drafts, [sectionId]: value }))
+          }
+          onUseSelection={() => void usePdfSelectionReference()}
+          onClearSelection={() => {
+            setPdfSelectionQuote("");
+            setPdfSelectionImageDataUrl("");
+          }}
+          onRemoveSelectionReference={removePdfSelectionReference}
+          onOpenCardQuestion={(sectionId) => void openPdfCardQuestion(sectionId)}
+          onAskCardQuestion={(sectionId) => void askPdfCardQuestion(sectionId)}
           onGenerateGuide={() => void runAnalysis()}
           onParseDeepPdf={() => void runDeepPdfParse()}
           onModeChange={switchPdfAnalysisMode}
@@ -1921,6 +2130,8 @@ function PdfReader({
   pageRange,
   targetPage,
   question,
+  selectionQuote,
+  selectionImageDataUrl,
   answers,
   guide,
   guideState,
@@ -1936,12 +2147,17 @@ function PdfReader({
   deepPdfParseRawError,
   activeDeepPdfSectionId,
   showAllDeepPdfBoundingBoxes,
+  activeQuestionSectionId,
   analysis,
   analysisState,
   analysisError,
   rawAnalysisError,
   sectionAnalyzeState,
   sectionAnalyzeErrors,
+  followUps,
+  questionDrafts,
+  pendingQuestions,
+  questionErrors,
   previewState,
   previewError,
   state,
@@ -1952,6 +2168,12 @@ function PdfReader({
   onPageRangeChange,
   onTargetPageChange,
   onQuestionChange,
+  onQuestionDraftChange,
+  onUseSelection,
+  onClearSelection,
+  onRemoveSelectionReference,
+  onOpenCardQuestion,
+  onAskCardQuestion,
   onGenerateGuide,
   onParseDeepPdf,
   onModeChange,
@@ -1965,6 +2187,8 @@ function PdfReader({
   pageRange: string;
   targetPage: string;
   question: string;
+  selectionQuote: string;
+  selectionImageDataUrl: string;
   answers: PdfAnswer[];
   guide: PdfGuideResult | null;
   guideState: PdfQuestionState;
@@ -1980,12 +2204,17 @@ function PdfReader({
   deepPdfParseRawError: string;
   activeDeepPdfSectionId: string | null;
   showAllDeepPdfBoundingBoxes: boolean;
+  activeQuestionSectionId: string | null;
   analysis: AnalysisResult | null;
   analysisState: AnalyzeState;
   analysisError: string;
   rawAnalysisError: string;
   sectionAnalyzeState: Record<string, SectionAnalyzeState>;
   sectionAnalyzeErrors: Record<string, string>;
+  followUps: Record<string, SectionFollowUp[]>;
+  questionDrafts: Record<string, string>;
+  pendingQuestions: Record<string, boolean>;
+  questionErrors: Record<string, string>;
   previewState: PdfPreviewState;
   previewError: string;
   state: PdfQuestionState;
@@ -1996,6 +2225,12 @@ function PdfReader({
   onPageRangeChange: (value: string) => void;
   onTargetPageChange: (value: string) => void;
   onQuestionChange: (value: string) => void;
+  onQuestionDraftChange: (sectionId: string, value: string) => void;
+  onUseSelection: () => void;
+  onClearSelection: () => void;
+  onRemoveSelectionReference: (referenceLabel: string) => void;
+  onOpenCardQuestion: (sectionId: string) => void;
+  onAskCardQuestion: (sectionId: string) => void;
   onGenerateGuide: () => void;
   onParseDeepPdf: () => void;
   onModeChange: (mode: PdfAnalysisMode) => void;
@@ -2005,7 +2240,6 @@ function PdfReader({
   onAsk: () => void;
   onOpenSettings: () => void;
 }) {
-  const canAsk = !needsSettings && state !== "running" && normalizeQuestion(question);
   const canGenerateGuide = !needsSettings && analysisState !== "running";
   const focusedPage = Number(targetPage);
   const guideByPage = useMemo(() => new Map((guide?.pages ?? []).map((pageGuide) => [pageGuide.page, pageGuide])), [guide]);
@@ -2026,6 +2260,94 @@ function PdfReader({
     : 0;
   const canParseDeepPdf = !needsParserSettings && deepPdfParseState !== "running";
   const canAnalyze = !needsSettings && analysisState !== "running" && (pdfAnalysisMode === "visual" || Boolean(deepPdfParse));
+  const renderPdfCardQa = (sectionId: string, placeholder: string) => {
+    const sectionFollowUps = followUps[sectionId] ?? [];
+    const pending = pendingQuestions[sectionId] ?? false;
+    const showQA = sectionFollowUps.length > 0 || activeQuestionSectionId === sectionId || pending;
+    if (!showQA) {
+      return null;
+    }
+
+    const hasQuote = Boolean(selectionQuote && activeQuestionSectionId === sectionId);
+    const hasContent = Boolean(normalizeQuestion(questionDrafts[sectionId] ?? "") || hasQuote);
+    const quoteReferenceLabels = hasQuote ? getPdfQuoteReferenceLabels(selectionQuote) : [];
+
+    return (
+      <>
+        {sectionFollowUps.length > 0 && (
+          <div className="follow-up-list" onClick={(event) => event.stopPropagation()}>
+            {sectionFollowUps.map((item, idx) => (
+              <FollowUpItem
+                key={`${item.createdAt}-${item.question}`}
+                item={item}
+                defaultExpanded={idx === sectionFollowUps.length - 1}
+              />
+            ))}
+          </div>
+        )}
+        {questionErrors[sectionId] && <p className="follow-up-error">{questionErrors[sectionId]}</p>}
+        <form
+          className="follow-up-form"
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.stopPropagation()}
+          onSubmit={(event) => {
+            event.preventDefault();
+            onAskCardQuestion(sectionId);
+          }}
+        >
+          {hasQuote && (
+            <div className="selection-quote">
+              <span className="quote-label">Quoted from PDF:</span>
+              <button
+                type="button"
+                className="quote-dismiss-button"
+                onClick={onClearSelection}
+              >
+                x
+              </button>
+              <div className="quote-reference-list">
+                {quoteReferenceLabels.map((label) => (
+                  <button
+                    key={label}
+                    type="button"
+                    className="quote-reference-chip"
+                    onClick={() => onRemoveSelectionReference(label)}
+                    title="Remove this reference"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {selectionImageDataUrl && (
+                <img className="quote-selection-image" src={selectionImageDataUrl} alt="Selected PDF region" />
+              )}
+            </div>
+          )}
+          <div className="follow-up-input-row">
+            <input
+              type="text"
+              value={questionDrafts[sectionId] ?? ""}
+              disabled={pending || needsSettings}
+              placeholder={placeholder}
+              onChange={(event) => onQuestionDraftChange(sectionId, event.target.value)}
+              onFocus={() => onOpenCardQuestion(sectionId)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  if (hasContent) {
+                    onAskCardQuestion(sectionId);
+                  }
+                }
+              }}
+            />
+            <button type="submit" disabled={pending || needsSettings || !hasContent}>
+              {pending ? "Asking..." : "Ask"}
+            </button>
+          </div>
+        </form>
+      </>
+    );
+  };
   return (
     <>
       <section className="page-meta">
@@ -2069,7 +2391,7 @@ function PdfReader({
             className={pdfAnalysisMode === "visual" ? "active" : ""}
             onClick={() => onModeChange("visual")}
           >
-            当前模式
+            图片解析
           </button>
           <button
             type="button"
@@ -2086,7 +2408,7 @@ function PdfReader({
               {deepPdfParseState === "running" ? "Parsing with Datalab..." : deepPdfParse ? "Re-parse PDF" : "Parse with Datalab"}
             </button>
             <button className="pdf-guide-button" type="button" disabled={!canAnalyze} onClick={onGenerateGuide}>
-              {analysisState === "running" ? "Analyzing sections..." : analysis ? "Re-analyze sections" : "Analyze parsed sections"}
+              {analysisState === "running" ? "Analyzing pages..." : analysis ? "Re-analyze pages" : "Analyze parsed pages"}
             </button>
             <button className="secondary-button" type="button" disabled={!deepPdfParse} onClick={onToggleDeepBoundingBoxes}>
               {showAllDeepPdfBoundingBoxes ? "Hide bounding boxes" : "Show bounding boxes"}
@@ -2115,30 +2437,18 @@ function PdfReader({
           </label>
         </div>
 
-        <form
-          className="pdf-question-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            onAsk();
-          }}
-        >
-          <textarea
-            value={question}
-            disabled={state === "running"}
-            placeholder="Ask about this PDF..."
-            onChange={(event) => onQuestionChange(event.target.value)}
-          />
-          <button type="submit" disabled={!canAsk}>
-            {state === "running" ? "Reading PDF..." : "Ask PDF"}
+        {pdfAnalysisMode === "deep" && (
+          <button className="secondary-button" type="button" disabled={state === "running"} onClick={onUseSelection}>
+            Use viewer selection on active card
           </button>
-        </form>
+        )}
       </section>
 
       {analysisState === "running" && (
         <Status
           text={
             pdfAnalysisMode === "deep"
-              ? `Analyzing parsed section ${completedDeepSections + 1} of ${deepPdfParse?.sections.length ?? 0}. ${completedDeepSections} done.`
+              ? `Analyzing parsed page ${completedDeepSections + 1} of ${deepPdfParse?.sections.length ?? 0}. ${completedDeepSections} done.`
               : runningPage
               ? `Analyzing page ${runningPage} of ${pdfDocument.pageCount}. ${completedPages} done.`
               : "Preparing PDF overview..."
@@ -2178,11 +2488,7 @@ function PdfReader({
       )}
 
       {pdfAnalysisMode === "deep" && (
-        <section className="pdf-deep-panel">
-          <div className="pdf-pages-header">
-            <h2>Parsed Sections</h2>
-            <span>{deepPdfParse ? `${deepPdfParse.sections.length} sections` : "Not parsed"}</span>
-          </div>
+        <>
           {deepPdfParseState === "running" && <Status text={deepPdfParseStatus || "Parsing PDF with Datalab..."} />}
           {deepPdfParseState === "done" && deepPdfParseStatus && <p className="pdf-deep-status">{deepPdfParseStatus}</p>}
           {deepPdfParse?.parseQualityScore !== undefined && (
@@ -2196,7 +2502,7 @@ function PdfReader({
             </section>
           )}
           {!deepPdfParse && deepPdfParseState !== "running" && (
-            <p className="pdf-deep-empty">Parse this PDF first to create text-and-layout sections with bounding boxes.</p>
+            <p className="pdf-deep-empty">Parse this PDF first to create page-level text and layout blocks with bounding boxes.</p>
           )}
           {deepPdfParse && (
             <div className="pdf-deep-section-list">
@@ -2209,6 +2515,11 @@ function PdfReader({
                     data-learn-panel-section-card-id={section.id}
                     key={section.id}
                     onClick={() => onFocusDeepSection(section)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      onFocusDeepSection(section);
+                      onOpenCardQuestion(section.id);
+                    }}
                     onMouseEnter={() => {
                       if (activeDeepPdfSectionId !== section.id) {
                         onFocusDeepSection(section);
@@ -2216,39 +2527,40 @@ function PdfReader({
                     }}
                   >
                     <div className="pdf-page-header">
-                      <span>Pages {section.pageStart === section.pageEnd ? section.pageStart : `${section.pageStart}-${section.pageEnd}`}</span>
+                      <span>{formatPdfSectionPageTitle(section.pageStart, section.pageEnd)}</span>
                       <strong>{section.blocks.length} blocks</strong>
                       {sectionStatus && sectionStatus !== "done" && (
                         <span className={`section-status ${sectionStatus}`}>{formatSectionAnalyzeState(sectionStatus)}</span>
                       )}
                     </div>
-                    <h3>{section.title}</h3>
+                    {!isRedundantPdfSectionTitle(section.title, section.pageStart, section.pageEnd) && <h3>{section.title}</h3>}
                     {result ? (
                       <div className="pdf-page-guide">
-                        <InfoBlock title="Summary" body={result.summary} />
-                        <InfoBlock title="What this means" body={result.interpretation} />
-                        <InfoBlock title="Role in PDF" body={result.role_in_article} />
+                        <InfoBlock title="Summary" body={result.summary} pdfPage={section.pageStart} />
+                        <InfoBlock title="What this means" body={result.interpretation} pdfPage={section.pageStart} />
+                        <InfoBlock title="Role in PDF" body={result.role_in_article} pdfPage={section.pageStart} />
                       </div>
                     ) : (
                       <>
-                        <p className="preview">{section.text.slice(0, 320)}</p>
+                        <p className="preview">{formatDeepPdfPreview(section.text)}</p>
                         {sectionStatus && sectionStatus !== "done" && (
                           <p className={`section-progress ${sectionStatus}`}>
                             {sectionStatus === "error"
-                              ? sectionAnalyzeErrors[section.id] || "This parsed section failed to analyze."
+                              ? sectionAnalyzeErrors[section.id] || "This parsed page failed to analyze."
                               : sectionStatus === "running"
-                                ? "Analyzing this parsed section now..."
-                                : "Waiting for earlier parsed sections..."}
+                                ? "Analyzing this parsed page now..."
+                                : "Waiting for earlier parsed pages..."}
                           </p>
                         )}
                       </>
                     )}
+                    {renderPdfCardQa(section.id, "Ask about this page...")}
                   </article>
                 );
               })}
             </div>
           )}
-        </section>
+        </>
       )}
 
       {pdfAnalysisMode === "visual" && <section className="pdf-pages">
@@ -2277,6 +2589,11 @@ function PdfReader({
                 data-learn-panel-pdf-page={image.page}
                 key={image.page}
                 onClick={() => onFocusPage(image.page)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  onFocusPage(image.page);
+                  onOpenCardQuestion(sectionId);
+                }}
               >
                 <div className="pdf-page-header">
                   <span>Page {image.page}</span>
@@ -2287,15 +2604,15 @@ function PdfReader({
                 </div>
                 {pageAnalysis ? (
                   <div className="pdf-page-guide">
-                    <InfoBlock title="Summary" body={pageAnalysis.summary} />
-                    <InfoBlock title="What this means" body={pageAnalysis.interpretation} />
-                    <InfoBlock title="Role in PDF" body={pageAnalysis.role_in_article} />
+                    <InfoBlock title="Summary" body={pageAnalysis.summary} pdfPage={image.page} />
+                    <InfoBlock title="What this means" body={pageAnalysis.interpretation} pdfPage={image.page} />
+                    <InfoBlock title="Role in PDF" body={pageAnalysis.role_in_article} pdfPage={image.page} />
                   </div>
                 ) : pageGuide ? (
                   <div className="pdf-page-guide">
-                    <InfoBlock title="Summary" body={pageGuide.summary} />
-                    <InfoBlock title="Explanation" body={pageGuide.explanation} />
-                    <InfoBlock title="Goal" body={pageGuide.goal} />
+                    <InfoBlock title="Summary" body={pageGuide.summary} pdfPage={image.page} />
+                    <InfoBlock title="Explanation" body={pageGuide.explanation} pdfPage={image.page} />
+                    <InfoBlock title="Goal" body={pageGuide.goal} pdfPage={image.page} />
                   </div>
                 ) : (
                   <div className="pdf-page-image-button">
@@ -2311,27 +2628,12 @@ function PdfReader({
                         : "Waiting for earlier pages..."}
                   </p>
                 )}
+                {renderPdfCardQa(sectionId, "Ask about this page...")}
               </article>
             );
           })}
         </div>
       </section>}
-
-      {answers.length > 0 && (
-        <section className="pdf-answers">
-          <h2>PDF Q&A</h2>
-          {answers.map((item) => (
-            <article className="pdf-answer" key={`${item.createdAt}-${item.question}`}>
-              <div className="pdf-answer-meta">
-                <span>Pages {formatPages(item.pages)}</span>
-                {item.targetPage && <span>Target {item.targetPage}</span>}
-              </div>
-              <h3>{item.question}</h3>
-              <MarkupBlocks text={item.answer} />
-            </article>
-          ))}
-        </section>
-      )}
     </>
   );
 }
@@ -2486,13 +2788,41 @@ function FollowUpItem({
   );
 }
 
-function InfoBlock({ title, body }: { title: string; body: string }) {
+function InfoBlock({ title, body, pdfPage }: { title: string; body: string; pdfPage?: number }) {
+  const displayBody = pdfPage ? stripRepeatedPdfPageLabel(body, pdfPage) : body;
   return (
     <div className="info-block">
       <h3>{title}</h3>
-      <MarkupBlocks text={body} />
+      <MarkupBlocks text={displayBody} />
     </div>
   );
+}
+
+function stripRepeatedPdfPageLabel(text: string, page: number) {
+  const pageLabel = String(page);
+  const prefix = String.raw`(^|\n)(\s*(?:(?:[-*•]|\d+[.)])\s+)?)(?:\*\*)?`;
+  const suffix = String.raw`\s*[:：.\-–—]?\s*(?:\*\*)?\s*`;
+  return text
+    .replace(new RegExp(`${prefix}(?:PDF\\s+)?Page\\s+${pageLabel}${suffix}`, "gi"), "$1$2")
+    .replace(new RegExp(`${prefix}P\\.?\\s*${pageLabel}${suffix}`, "gi"), "$1$2")
+    .replace(new RegExp(`${prefix}第\\s*${pageLabel}\\s*页${suffix}`, "g"), "$1$2")
+    .trimStart();
+}
+
+function formatPdfSectionPageTitle(pageStart: number, pageEnd: number) {
+  return pageStart === pageEnd ? `Page ${pageStart}` : `Pages ${pageStart}-${pageEnd}`;
+}
+
+function isRedundantPdfSectionTitle(title: string, pageStart: number, pageEnd: number) {
+  return title.trim().toLowerCase() === formatPdfSectionPageTitle(pageStart, pageEnd).toLowerCase();
+}
+
+function formatDeepPdfPreview(text: string) {
+  return text
+    .replace(/^\[Page\s+\d+\s+\|\s+[^\]\n]+\]\s*/gm, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 320);
 }
 
 function MarkupBlocks({ text }: { text: string }) {
@@ -2875,7 +3205,7 @@ function buildDeepPdfArticle(result: DeepPdfParseResult): ExtractedArticle {
     url: getDeepPdfPageKey(result.sourceUrl, result.pageRange),
     siteName: "PDF Deep",
     language: "unknown",
-    excerpt: `${result.pageCount} page PDF parsed by Datalab into ${result.sections.length} sections${rangeLabel}`,
+    excerpt: `${result.pageCount} page PDF parsed by Datalab into ${result.sections.length} pages${rangeLabel}`,
     text: result.sections.map((section) => section.text).join("\n\n"),
     sections: result.sections.map((section) => ({
       id: section.id,
@@ -3040,6 +3370,49 @@ function getPageKey(url: string): string {
 
 function normalizeQuestion(value: string): string {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function getPdfQuoteReferenceLabels(value: string): string[] {
+  const labels = [...value.matchAll(/^\[Page\s+\d+\s+\|\s+[^\]\n]+\]/gm)].map((match) => match[0]);
+  if (labels.length === 0) {
+    return ["Selected PDF text"];
+  }
+
+  const counts = new Map<string, number>();
+  for (const label of labels) {
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([label, count]) => (count > 1 ? `${label} x${count}` : label));
+}
+
+function removePdfQuoteReference(value: string, referenceLabel: string): string {
+  const references = parsePdfQuoteReferences(value);
+  if (references.length === 0) {
+    return "";
+  }
+
+  const targetLabel = normalizePdfReferenceLabel(referenceLabel);
+  return references
+    .filter((reference) => normalizePdfReferenceLabel(reference.label) !== targetLabel)
+    .map((reference) => `${reference.label}\n${reference.text}`.trim())
+    .join("\n\n");
+}
+
+function parsePdfQuoteReferences(value: string): Array<{ label: string; text: string }> {
+  return [...value.matchAll(/^(\[Page\s+\d+\s+\|\s+[^\]\n]+\])\n([\s\S]*?)(?=^\[Page\s+\d+\s+\|\s+[^\]\n]+\]\n|\s*$)/gm)]
+    .map((match) => ({
+      label: match[1],
+      text: match[2].trim()
+    }))
+    .filter((reference) => reference.label && reference.text);
+}
+
+function normalizePdfReferenceLabel(label: string): string {
+  return label.trim().replace(/^\[/, "").replace(/\]$/, "").replace(/\s+x\d+$/i, "");
+}
+
+function formatPdfQuoteTitle(value: string): string {
+  return getPdfQuoteReferenceLabels(value).join("\n");
 }
 
 function formatPages(pages: number[]): string {

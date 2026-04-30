@@ -11,6 +11,22 @@ GlobalWorkerOptions.workerSrc = workerSrc;
 type ViewerState = "landing" | "loading" | "ready" | "error";
 type PageSize = { width: number; height: number };
 type CoordinateBase = { xMin: number; yMin: number; width: number; height: number };
+type DragSelection = {
+  page: number;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  mode: "image" | "structure";
+  add: boolean;
+  isDragging: boolean;
+};
+type PdfSelectionPayload = {
+  text: string;
+  imageDataUrl?: string;
+};
+
+const PDF_PAGE_SECTION_PREFIX = "pdf-page-";
 
 function getSourceFromUrl(): string | null {
   const params = new URLSearchParams(location.search);
@@ -27,12 +43,19 @@ function App() {
   const [highlightedBlocks, setHighlightedBlocks] = useState<DeepPdfBlock[]>([]);
   const [highlightedSectionId, setHighlightedSectionId] = useState("");
   const [highlightedPageBboxes, setHighlightedPageBboxes] = useState<Record<number, PdfBoundingBox>>({});
+  const [selectedBlockIds, setSelectedBlockIds] = useState<Set<string>>(() => new Set());
+  const [dragSelection, setDragSelection] = useState<DragSelection | null>(null);
   const [pageSizes, setPageSizes] = useState<Record<number, PageSize>>({});
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const renderingRef = useRef(0);
   const pageCountRef = useRef(0);
+  const highlightedBlocksRef = useRef<DeepPdfBlock[]>([]);
+  const selectedBlockIdsRef = useRef<Set<string>>(new Set());
+  const selectionTextRef = useRef("");
+  const selectionImageDataUrlRef = useRef("");
+  const blockDragDidSelectRef = useRef(false);
 
   const loadPdf = useCallback(async (source: string | ArrayBuffer) => {
     const version = ++renderingRef.current;
@@ -87,6 +110,14 @@ function App() {
     scrollToPageRef.current = scrollToPage;
   });
 
+  useEffect(() => {
+    highlightedBlocksRef.current = highlightedBlocks;
+  }, [highlightedBlocks]);
+
+  useEffect(() => {
+    selectedBlockIdsRef.current = selectedBlockIds;
+  }, [selectedBlockIds]);
+
   // Listen for messages from side panel
   useEffect(() => {
     const handler = (
@@ -100,8 +131,9 @@ function App() {
       }
 
       if (request.type === "LEARN_PANEL_GET_SELECTION") {
-        const selection = window.getSelection()?.toString().trim() ?? "";
-        sendResponse({ ok: true, selection });
+        const selectedBlocks = formatSelectedBlockReference(highlightedBlocksRef.current, selectedBlockIdsRef.current);
+        const selection = selectedBlocks || selectionTextRef.current || window.getSelection()?.toString().trim() || "";
+        sendResponse({ ok: true, selection, selectionImageDataUrl: selection ? selectionImageDataUrlRef.current : undefined });
         return false;
       }
 
@@ -122,13 +154,37 @@ function App() {
       }
 
       if (request.type === "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS") {
+        const nextBlocks = request.blocks.filter((block) => block.bbox);
+        const nextBlockIds = new Set(nextBlocks.map(getBlockKey));
         setHighlightedSectionId(request.sectionId);
-        setHighlightedBlocks(request.blocks.filter((block) => block.bbox));
+        setHighlightedBlocks(nextBlocks);
         setHighlightedPageBboxes(request.pageBboxes ?? {});
+        setSelectedBlockIds((selectedIds) => {
+          const next = new Set([...selectedIds].filter((id) => nextBlockIds.has(id)));
+          selectedBlockIdsRef.current = next;
+          if (next.size === 0) {
+            selectionTextRef.current = "";
+            selectionImageDataUrlRef.current = "";
+          }
+          return next;
+        });
         const firstPage = request.blocks.find((block) => block.bbox)?.page;
         if (firstPage) {
           scrollToPageRef.current(firstPage);
         }
+        sendResponse({ ok: true });
+        return false;
+      }
+
+      if (request.type === "LEARN_PANEL_REMOVE_PDF_SELECTION_REFERENCE") {
+        const blocks = highlightedBlocksRef.current;
+        const nextSelectedIds = removeSelectedBlockReference(blocks, selectedBlockIdsRef.current, request.referenceLabel);
+        applySelectedBlockIds(nextSelectedIds);
+        selectionImageDataUrlRef.current = "";
+        selectionTextRef.current = formatSelectedBlockReference(blocks, nextSelectedIds);
+        syncPdfSelectionToPanel(blocks, getSelectionSectionId(blocks, nextSelectedIds, highlightedSectionId), {
+          text: selectionTextRef.current
+        });
         sendResponse({ ok: true });
         return false;
       }
@@ -250,6 +306,185 @@ function App() {
     el?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function handleBlockClick(block: DeepPdfBlock, targetSectionId: string, event: React.MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    if (blockDragDidSelectRef.current) {
+      return;
+    }
+    const blockKey = getBlockKey(block);
+    const addToSelection = event.metaKey || event.ctrlKey || event.shiftKey;
+    const selectedOnPage = filterSelectedIdsToPage(selectedBlockIdsRef.current, block.page, highlightedBlocks);
+    const blockIsSelected = selectedOnPage.has(blockKey);
+    const nextSelectedIds = new Set(addToSelection || blockIsSelected ? selectedOnPage : []);
+    if (blockIsSelected) {
+      nextSelectedIds.delete(blockKey);
+    } else {
+      nextSelectedIds.add(blockKey);
+    }
+    selectionImageDataUrlRef.current = "";
+    selectionTextRef.current = formatSelectedBlockReference(highlightedBlocks, nextSelectedIds);
+    applySelectedBlockIds(nextSelectedIds);
+    syncPdfSelectionToPanel(highlightedBlocks, getSelectionSectionId(highlightedBlocks, nextSelectedIds, targetSectionId), {
+      text: selectionTextRef.current
+    });
+
+    if (targetSectionId) {
+      void chrome.runtime
+        .sendMessage({ type: "LEARN_VIEWER_FOCUS_PDF_SECTION", sectionId: targetSectionId })
+        .catch(() => undefined);
+    }
+  }
+
+  function handleBlockContextMenu(block: DeepPdfBlock, targetSectionId: string, event: React.MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const blockKey = getBlockKey(block);
+    const currentSelectedIds = selectedBlockIdsRef.current;
+    const currentPageIds = filterSelectedIdsToPage(currentSelectedIds, block.page, highlightedBlocks);
+    const nextSelectedIds = currentPageIds.has(blockKey) ? currentPageIds : new Set([blockKey]);
+    const quote = formatSelectedBlockReference(highlightedBlocks, nextSelectedIds);
+    selectionImageDataUrlRef.current = "";
+    selectionTextRef.current = quote;
+    applySelectedBlockIds(nextSelectedIds);
+
+    if (targetSectionId && quote) {
+      void chrome.runtime
+        .sendMessage({ type: "LEARN_VIEWER_USE_PDF_SELECTION", sectionId: targetSectionId, selection: quote })
+        .catch(() => undefined);
+    }
+  }
+
+  function beginBlockDragSelection(page: number, event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !pageRefs.current.get(page)?.querySelector("canvas")) {
+      return;
+    }
+    const target = event.target as HTMLElement;
+    if (target.closest("input, textarea, a")) {
+      return;
+    }
+
+    const point = getPointerPointOnPage(page, event);
+    if (!point) {
+      return;
+    }
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const mode = event.metaKey ? "structure" : "image";
+    setDragSelection({
+      page,
+      startX: point.x,
+      startY: point.y,
+      endX: point.x,
+      endY: point.y,
+      mode,
+      add: mode === "structure" && (event.ctrlKey || event.shiftKey),
+      isDragging: false
+    });
+  }
+
+  function updateBlockDragSelection(page: number, event: React.PointerEvent<HTMLDivElement>) {
+    if (!dragSelection || dragSelection.page !== page) {
+      return;
+    }
+    const point = getPointerPointOnPage(page, event);
+    if (!point) {
+      return;
+    }
+    const moved = Math.abs(point.x - dragSelection.startX) > 0.4 || Math.abs(point.y - dragSelection.startY) > 0.4;
+    setDragSelection((selection) =>
+      selection && selection.page === page
+        ? { ...selection, endX: point.x, endY: point.y, isDragging: selection.isDragging || moved }
+        : selection
+    );
+  }
+
+  function finishBlockDragSelection(page: number, event: React.PointerEvent<HTMLDivElement>) {
+    if (!dragSelection || dragSelection.page !== page) {
+      return;
+    }
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    const point = getPointerPointOnPage(page, event);
+    const selection = point
+      ? {
+        ...dragSelection,
+        endX: point.x,
+        endY: point.y,
+        isDragging:
+          dragSelection.isDragging ||
+          Math.abs(point.x - dragSelection.startX) > 0.4 ||
+          Math.abs(point.y - dragSelection.startY) > 0.4
+      }
+      : dragSelection;
+    setDragSelection(null);
+
+    if (!selection.isDragging) {
+      if (!selection.add) {
+        const nextSelectedIds = new Set<string>();
+        applySelectedBlockIds(nextSelectedIds);
+        selectionTextRef.current = "";
+        selectionImageDataUrlRef.current = "";
+        syncPdfSelectionToPanel(highlightedBlocks, highlightedSectionId, { text: "" });
+      }
+      return;
+    }
+
+    blockDragDidSelectRef.current = true;
+    window.setTimeout(() => {
+      blockDragDidSelectRef.current = false;
+    }, 0);
+
+    if (selection.mode === "structure") {
+      const selectedOnPage = getBlocksIntersectingSelection(selection, highlightedBlocks, pageSizes[page], highlightedPageBboxes[page]);
+      const nextSelectedIds = new Set(selection.add ? filterSelectedIdsToPage(selectedBlockIdsRef.current, page, highlightedBlocks) : []);
+      selectedOnPage.forEach((block) => nextSelectedIds.add(getBlockKey(block)));
+      const text = formatSelectedBlockReference(highlightedBlocks, nextSelectedIds);
+      selectionTextRef.current = text;
+      selectionImageDataUrlRef.current = "";
+      applySelectedBlockIds(nextSelectedIds);
+      syncPdfSelectionToPanel(
+        highlightedBlocks,
+        getSelectionSectionId(highlightedBlocks, nextSelectedIds, highlightedSectionId || `${PDF_PAGE_SECTION_PREFIX}${page}`),
+        { text }
+      );
+      return;
+    }
+
+    const imageDataUrl = cropPageSelectionImage(pageRefs.current.get(selection.page), selection);
+    const text = imageDataUrl ? `[Page ${page} | Selected image region]\nSelected PDF image region.` : "";
+    selectionTextRef.current = text;
+    selectionImageDataUrlRef.current = imageDataUrl ?? "";
+    applySelectedBlockIds(new Set());
+    syncPdfSelectionToPanel(highlightedBlocks, highlightedSectionId || `${PDF_PAGE_SECTION_PREFIX}${page}`, {
+      text,
+      imageDataUrl: imageDataUrl ?? undefined
+    });
+  }
+
+  function cancelBlockDragSelection() {
+    setDragSelection(null);
+  }
+
+  function applySelectedBlockIds(nextSelectedIds: Set<string>) {
+    selectedBlockIdsRef.current = nextSelectedIds;
+    setSelectedBlockIds(nextSelectedIds);
+  }
+
+  function getPointerPointOnPage(page: number, event: React.PointerEvent<HTMLDivElement>): { x: number; y: number } | null {
+    const wrapper = pageRefs.current.get(page);
+    if (!wrapper) {
+      return null;
+    }
+    const rect = wrapper.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    return {
+      x: clampPercent(((event.clientX - rect.left) / rect.width) * 100),
+      y: clampPercent(((event.clientY - rect.top) / rect.height) * 100)
+    };
+  }
+
   if (state === "landing") {
     return (
       <div className="viewer-shell">
@@ -324,6 +559,10 @@ function App() {
             <div
               className="pdf-page-wrapper"
               key={page}
+              onPointerDown={(event) => beginBlockDragSelection(page, event)}
+              onPointerMove={(event) => updateBlockDragSelection(page, event)}
+              onPointerUp={(event) => finishBlockDragSelection(page, event)}
+              onPointerCancel={cancelBlockDragSelection}
               ref={(el) => {
                 if (el) {
                   pageRefs.current.set(page, el);
@@ -338,7 +577,16 @@ function App() {
                 sectionId={highlightedSectionId}
                 pageSize={pageSizes[page]}
                 pageBBox={highlightedPageBboxes[page]}
+                selectedBlockIds={selectedBlockIds}
+                onBlockClick={handleBlockClick}
+                onBlockContextMenu={handleBlockContextMenu}
               />
+              {dragSelection?.page === page && dragSelection.isDragging && (
+                <span
+                  className={`pdf-block-selection-rect ${dragSelection.mode === "structure" ? "structure" : "image"}`}
+                  style={getSelectionRectStyle(dragSelection)}
+                />
+              )}
             </div>
           ))}
         </div>
@@ -351,12 +599,18 @@ function PdfBlockOverlay({
   blocks,
   sectionId,
   pageSize,
-  pageBBox
+  pageBBox,
+  selectedBlockIds,
+  onBlockClick,
+  onBlockContextMenu
 }: {
   blocks: DeepPdfBlock[];
   sectionId: string;
   pageSize: PageSize | undefined;
   pageBBox: PdfBoundingBox | undefined;
+  selectedBlockIds: Set<string>;
+  onBlockClick: (block: DeepPdfBlock, targetSectionId: string, event: React.MouseEvent<HTMLButtonElement>) => void;
+  onBlockContextMenu: (block: DeepPdfBlock, targetSectionId: string, event: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
   if (blocks.length === 0) {
     return null;
@@ -374,21 +628,15 @@ function PdfBlockOverlay({
         const blockType = formatBlockType(block.type);
         const hoverMarkdown = getBlockHoverMarkdown(block);
         const hoverText = markdownToPlainText(hoverMarkdown);
+        const selected = selectedBlockIds.has(getBlockKey(block));
         return (
           <button
             aria-label={`Focus parsed ${blockType} block`}
-            className={`pdf-block-highlight pdf-block-highlight--${getBlockTypeTone(block.type)}`}
+            className={`pdf-block-highlight pdf-block-highlight--${getBlockTypeTone(block.type)}${selected ? " selected" : ""}`}
             data-block-type={blockType}
             key={`${targetSectionId}-${block.id}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              if (!targetSectionId) {
-                return;
-              }
-              void chrome.runtime
-                .sendMessage({ type: "LEARN_VIEWER_FOCUS_PDF_SECTION", sectionId: targetSectionId })
-                .catch(() => undefined);
-            }}
+            onClick={(event) => onBlockClick(block, targetSectionId, event)}
+            onContextMenu={(event) => onBlockContextMenu(block, targetSectionId, event)}
             title={`${blockType}: ${hoverText || block.text.slice(0, 180)}`}
             style={{
               left: `${clampPercent(geometry.left)}%`,
@@ -411,6 +659,174 @@ function PdfBlockOverlay({
 
 function formatBlockType(type: string): string {
   return type.trim() || "Text";
+}
+
+function getBlockKey(block: DeepPdfBlock): string {
+  return `${block.page}:${block.id}`;
+}
+
+function formatSelectedBlockReference(blocks: DeepPdfBlock[], selectedBlockIds: Set<string>): string {
+  if (selectedBlockIds.size === 0) {
+    return "";
+  }
+
+  const referenceLabels = buildBlockReferenceLabels(blocks);
+  return blocks
+    .filter((block) => selectedBlockIds.has(getBlockKey(block)))
+    .sort((a, b) => a.page - b.page || compareBbox(a.bbox, b.bbox))
+    .map((block) => {
+      const content = cleanHoverMarkdown(block.text || block.caption || block.type);
+      const text = content.length > 1200 ? `${content.slice(0, 1200)}...` : content;
+      return `[${referenceLabels.get(getBlockKey(block)) ?? `Page ${block.page} | ${formatBlockType(block.type)}`}]\n${text}`;
+    })
+    .join("\n\n");
+}
+
+function buildBlockReferenceLabels(blocks: DeepPdfBlock[]): Map<string, string> {
+  const labels = new Map<string, string>();
+  const counts = new Map<string, number>();
+  [...blocks]
+    .sort((a, b) => a.page - b.page || compareBbox(a.bbox, b.bbox))
+    .forEach((block) => {
+      const blockType = formatBlockType(block.type);
+      const countKey = `${block.page}:${blockType.toLowerCase()}`;
+      const typeIndex = (counts.get(countKey) ?? 0) + 1;
+      counts.set(countKey, typeIndex);
+      labels.set(getBlockKey(block), `Page ${block.page} | ${blockType} ${typeIndex}`);
+    });
+  return labels;
+}
+
+function filterSelectedIdsToPage(selectedBlockIds: Set<string>, page: number, blocks: DeepPdfBlock[]): Set<string> {
+  const pageBlockIds = new Set(blocks.filter((block) => block.page === page).map(getBlockKey));
+  return new Set([...selectedBlockIds].filter((id) => pageBlockIds.has(id)));
+}
+
+function removeSelectedBlockReference(blocks: DeepPdfBlock[], selectedBlockIds: Set<string>, referenceLabel: string): Set<string> {
+  const targetLabel = normalizePdfReferenceLabel(referenceLabel);
+  const labels = buildBlockReferenceLabels(blocks);
+  return new Set(
+    [...selectedBlockIds].filter((id) => normalizePdfReferenceLabel(labels.get(id) ?? "") !== targetLabel)
+  );
+}
+
+function normalizePdfReferenceLabel(label: string): string {
+  return label.trim().replace(/^\[/, "").replace(/\]$/, "").replace(/\s+x\d+$/i, "");
+}
+
+function syncPdfSelectionToPanel(blocks: DeepPdfBlock[], sectionId: string, selection: PdfSelectionPayload): void {
+  if (!sectionId) {
+    return;
+  }
+
+  const quote = selection.text;
+  void chrome.runtime
+    .sendMessage({
+      type: "LEARN_VIEWER_PDF_SELECTION_CHANGED",
+      sectionId,
+      selection: quote,
+      selectionImageDataUrl: selection.imageDataUrl
+    })
+    .catch(() => undefined);
+}
+
+function getSelectionSectionId(blocks: DeepPdfBlock[], selectedBlockIds: Set<string>, fallbackSectionId: string): string {
+  return blocks.find((block) => selectedBlockIds.has(getBlockKey(block)))?.sectionId || fallbackSectionId;
+}
+
+function compareBbox(a: PdfBoundingBox | undefined, b: PdfBoundingBox | undefined): number {
+  if (!a || !b) {
+    return 0;
+  }
+  return a[1] - b[1] || a[0] - b[0];
+}
+
+function getSelectionRectStyle(selection: DragSelection): React.CSSProperties {
+  const left = Math.min(selection.startX, selection.endX);
+  const top = Math.min(selection.startY, selection.endY);
+  const width = Math.abs(selection.endX - selection.startX);
+  const height = Math.abs(selection.endY - selection.startY);
+  return {
+    left: `${clampPercent(left)}%`,
+    top: `${clampPercent(top)}%`,
+    width: `${clampPercent(width)}%`,
+    height: `${clampPercent(height)}%`
+  };
+}
+
+function getBlocksIntersectingSelection(
+  selection: DragSelection,
+  blocks: DeepPdfBlock[],
+  pageSize: PageSize | undefined,
+  pageBBox: PdfBoundingBox | undefined
+): DeepPdfBlock[] {
+  const pageBlocks = blocks.filter((block) => block.page === selection.page && block.bbox);
+  if (pageBlocks.length === 0) {
+    return [];
+  }
+
+  const coordinateBase = getCoordinateBase(pageBlocks, pageSize, pageBBox);
+  const selectionRect = {
+    left: Math.min(selection.startX, selection.endX),
+    top: Math.min(selection.startY, selection.endY),
+    right: Math.max(selection.startX, selection.endX),
+    bottom: Math.max(selection.startY, selection.endY)
+  };
+
+  return pageBlocks.filter((block) => {
+    const geometry = getBlockGeometry(block, coordinateBase);
+    const blockRect = {
+      left: geometry.left,
+      top: geometry.top,
+      right: geometry.left + geometry.width,
+      bottom: geometry.top + geometry.height
+    };
+    return rectanglesIntersect(selectionRect, blockRect);
+  });
+}
+
+function rectanglesIntersect(
+  a: { left: number; top: number; right: number; bottom: number },
+  b: { left: number; top: number; right: number; bottom: number }
+): boolean {
+  return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
+}
+
+function cropPageSelectionImage(wrapper: HTMLDivElement | undefined, selection: DragSelection): string | null {
+  const canvas = wrapper?.querySelector("canvas");
+  if (!canvas) {
+    return null;
+  }
+
+  const left = Math.min(selection.startX, selection.endX);
+  const top = Math.min(selection.startY, selection.endY);
+  const width = Math.abs(selection.endX - selection.startX);
+  const height = Math.abs(selection.endY - selection.startY);
+  if (width < 0.5 || height < 0.5) {
+    return null;
+  }
+
+  const cropCanvas = document.createElement("canvas");
+  const context = cropCanvas.getContext("2d");
+  if (!context) {
+    return null;
+  }
+
+  const sx = Math.max(0, Math.floor((left / 100) * canvas.width));
+  const sy = Math.max(0, Math.floor((top / 100) * canvas.height));
+  const sw = Math.min(canvas.width - sx, Math.ceil((width / 100) * canvas.width));
+  const sh = Math.min(canvas.height - sy, Math.ceil((height / 100) * canvas.height));
+  if (sw <= 0 || sh <= 0) {
+    return null;
+  }
+
+  cropCanvas.width = sw;
+  cropCanvas.height = sh;
+  context.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  const dataUrl = cropCanvas.toDataURL("image/jpeg", 0.82);
+  cropCanvas.width = 0;
+  cropCanvas.height = 0;
+  return dataUrl;
 }
 
 function getBlockHoverMarkdown(block: DeepPdfBlock): string {
