@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4F46E5" />
+      <stop offset="100%" stop-color="#8B5CF6" />
+    </linearGradient>
+    <linearGradient id="left-page" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#e2e8f0" />
+      <stop offset="100%" stop-color="#ffffff" />
+    </linearGradient>
+    <linearGradient id="right-page" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#f1f5f9" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="15" flood-color="#000000" flood-opacity="0.25" />
+    </filter>
+    <filter id="shadow-light" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.15" />
+    </filter>
+  </defs>
+  
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  
+  <g filter="url(#shadow)">
+    <!-- Back Cover Left -->
+    <path d="M 256 110 C 180 110, 100 130, 80 150 L 80 400 C 100 370, 180 340, 256 340 Z" fill="#1e293b" />
+    <!-- Back Cover Right -->
+    <path d="M 256 110 C 332 110, 412 130, 432 150 L 432 400 C 412 370, 332 340, 256 340 Z" fill="#334155" />
+    
+    <!-- Left Page Base -->
+    <path d="M 256 120 C 190 120, 110 140, 90 160 L 90 380 C 110 350, 190 330, 256 330 Z" fill="url(#left-page)" />
+    <!-- Right Page Base -->
+    <path d="M 256 120 C 322 120, 402 140, 422 160 L 422 380 C 402 350, 322 330, 256 330 Z" fill="url(#right-page)" />
+    
+    <!-- Bookmark Ribbon -->
+    <path d="M 256 120 L 290 125 L 290 240 L 273 220 L 256 240 Z" fill="#ef4444" filter="url(#shadow-light)" />
+
+    <!-- Left Page Lines -->
+    <path d="M 130 190 Q 180 160 230 160" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" fill="none" />
+    <path d="M 130 240 Q 180 210 230 210" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" fill="none" />
+    <path d="M 130 290 Q 180 260 230 260" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" fill="none" />
+    
+    <!-- Right Page Lines -->
+    <path d="M 282 160 Q 332 160 382 190" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" fill="none" />
+    <path d="M 282 210 Q 332 210 382 240" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" fill="none" />
+    <path d="M 282 260 Q 332 260 382 290" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" fill="none" />
+
+    <!-- Center Binding Shadow/Line -->
+    <path d="M 256 120 L 256 330" stroke="#94a3b8" stroke-width="6" stroke-linecap="round" opacity="0.5" />
+    <path d="M 250 120 Q 256 110 262 120 L 262 330 Q 256 340 250 330 Z" fill="#0f172a" opacity="0.1" />
+  </g>
+</svg>
