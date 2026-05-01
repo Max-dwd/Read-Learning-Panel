@@ -9,7 +9,7 @@ import type {
   SectionFollowUp,
   Settings
 } from "./types";
-import { getActiveApiKey, getActiveDeepPdfSummaryApiKey, getActivePdfApiKey } from "./settings";
+import { getChatCompletionsEndpoint, getFeatureModelClientConfig, type FeatureModelClientConfig } from "./settings";
 import type { PdfPageImage } from "./pdf";
 
 const MAX_TOTAL_CHARS = 42000;
@@ -33,15 +33,6 @@ type OpenAIResponse = {
   };
 };
 
-type VisionClientConfig = {
-  apiKey: string;
-  endpoint: string;
-  model: string;
-  missingApiKeyMessage: string;
-  missingEndpointMessage: string;
-  missingModelMessage: string;
-};
-
 type OpenAIStreamChunk = {
   choices?: Array<{
     delta?: {
@@ -61,19 +52,20 @@ export async function analyzeArticle(
   article: ExtractedArticle,
   settings: Settings
 ): Promise<AnalysisResult> {
-  const apiKey = getActiveApiKey(settings);
+  const client = getArticleAnalysisClientConfig(settings);
+  const apiKey = client.apiKey;
   if (!apiKey) {
-    throw new Error("Missing API key. Open the extension settings and add your API key.");
+    throw new Error(client.missingApiKeyMessage);
   }
 
-  const response = await fetch(settings.endpoint, {
+  const response = await fetch(getChatCompletionsEndpoint(client.endpoint), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: settings.model,
+      model: client.model,
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [
@@ -108,19 +100,20 @@ export async function analyzeArticleProgressively(
   settings: Settings,
   onProgress: (event: AnalysisProgressEvent) => void
 ): Promise<AnalysisResult> {
-  const apiKey = getActiveApiKey(settings);
+  const client = getArticleAnalysisClientConfig(settings);
+  const apiKey = client.apiKey;
   if (!apiKey) {
-    throw new Error("Missing API key. Open the extension settings and add your API key.");
+    throw new Error(client.missingApiKeyMessage);
   }
 
-  const response = await fetch(settings.endpoint, {
+  const response = await fetch(getChatCompletionsEndpoint(client.endpoint), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: settings.model,
+      model: client.model,
       temperature: 0.2,
       stream: true,
       messages: [
@@ -214,18 +207,19 @@ export async function analyzePdfProgressively({
   settings: Settings;
   onProgress: (event: AnalysisProgressEvent) => void;
 }): Promise<AnalysisResult> {
-  const apiKey = getActivePdfApiKey(settings);
+  const client = getPdfVisualAnalysisClientConfig(settings);
+  const apiKey = client.apiKey;
   if (!apiKey) {
-    throw new Error("Missing PDF API key. Open the extension settings and add your PDF API key.");
+    throw new Error(client.missingApiKeyMessage);
   }
 
-  const pdfEndpoint = settings.pdfEndpoint.trim();
-  const pdfModel = settings.pdfModel.trim();
+  const pdfEndpoint = getChatCompletionsEndpoint(client.endpoint);
+  const pdfModel = client.model.trim();
   if (!pdfEndpoint) {
-    throw new Error("Missing PDF endpoint. Open the extension settings and add your PDF endpoint.");
+    throw new Error(client.missingEndpointMessage);
   }
   if (!pdfModel) {
-    throw new Error("Missing PDF parsing model. Open the extension settings and add a PDF parsing model.");
+    throw new Error(client.missingModelMessage);
   }
 
   const response = await fetch(pdfEndpoint, {
@@ -286,18 +280,19 @@ export async function analyzeDeepPdfProgressively(
   settings: Settings,
   onProgress: (event: AnalysisProgressEvent) => void
 ): Promise<AnalysisResult> {
-  const apiKey = getActiveDeepPdfSummaryApiKey(settings);
+  const client = getDeepPdfAnalysisClientConfig(settings);
+  const apiKey = client.apiKey;
   if (!apiKey) {
-    throw new Error("Missing deep PDF summary API key. Open settings and add the PDF deep analysis summary API key.");
+    throw new Error(client.missingApiKeyMessage);
   }
 
-  const endpoint = settings.deepPdfSummaryEndpoint.trim();
-  const model = settings.deepPdfSummaryModel.trim();
+  const endpoint = getChatCompletionsEndpoint(client.endpoint);
+  const model = client.model.trim();
   if (!endpoint) {
-    throw new Error("Missing deep PDF summary endpoint. Open settings and add the PDF deep analysis summary endpoint.");
+    throw new Error(client.missingEndpointMessage);
   }
   if (!model) {
-    throw new Error("Missing deep PDF summary model. Open settings and add the PDF deep analysis summary model.");
+    throw new Error(client.missingModelMessage);
   }
 
   const response = await fetch(endpoint, {
@@ -339,19 +334,20 @@ export async function analyzeArticleOverview(
   article: ExtractedArticle,
   settings: Settings
 ): Promise<AnalysisResult["overall"]> {
-  const apiKey = getActiveApiKey(settings);
+  const client = getArticleAnalysisClientConfig(settings);
+  const apiKey = client.apiKey;
   if (!apiKey) {
-    throw new Error("Missing API key. Open the extension settings and add your API key.");
+    throw new Error(client.missingApiKeyMessage);
   }
 
-  const response = await fetch(settings.endpoint, {
+  const response = await fetch(getChatCompletionsEndpoint(client.endpoint), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: settings.model,
+      model: client.model,
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [
@@ -392,19 +388,20 @@ export async function analyzeArticleSection({
   sectionIndex: number;
   settings: Settings;
 }): Promise<AnalysisSection> {
-  const apiKey = getActiveApiKey(settings);
+  const client = getArticleAnalysisClientConfig(settings);
+  const apiKey = client.apiKey;
   if (!apiKey) {
-    throw new Error("Missing API key. Open the extension settings and add your API key.");
+    throw new Error(client.missingApiKeyMessage);
   }
 
-  const response = await fetch(settings.endpoint, {
+  const response = await fetch(getChatCompletionsEndpoint(client.endpoint), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: settings.model,
+      model: client.model,
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [
@@ -445,7 +442,8 @@ export async function answerSectionQuestion({
   sectionAnalysis,
   priorFollowUps,
   question,
-  settings
+  settings,
+  featureModelKey = "articleQuestion"
 }: {
   article: ExtractedArticle;
   section: ExtractedSection;
@@ -453,20 +451,23 @@ export async function answerSectionQuestion({
   priorFollowUps: SectionFollowUp[];
   question: string;
   settings: Settings;
+  featureModelKey?: "articleQuestion" | "pdfDeepAnalysis";
 }): Promise<string> {
-  const apiKey = getActiveApiKey(settings);
+  const client =
+    featureModelKey === "pdfDeepAnalysis" ? getDeepPdfAnalysisClientConfig(settings) : getArticleQuestionClientConfig(settings);
+  const apiKey = client.apiKey;
   if (!apiKey) {
-    throw new Error("Missing API key. Open the extension settings and add your API key.");
+    throw new Error(client.missingApiKeyMessage);
   }
 
-  const response = await fetch(settings.endpoint, {
+  const response = await fetch(getChatCompletionsEndpoint(client.endpoint), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: settings.model,
+      model: client.model,
       temperature: 0.2,
       messages: [
         {
@@ -593,6 +594,7 @@ export async function generatePdfGuide({
       outputLanguage: settings.outputLanguage
     }),
     settings,
+    client: getPdfVisualAnalysisClientConfig(settings),
     maxTokens: Math.max(2600, Math.min(12000, pageImages.length * 450))
   });
   return parsePdfGuide(raw, pageImages.map((image) => image.page));
@@ -603,14 +605,14 @@ async function requestPdfVision({
   supplementalImageDataUrls = [],
   prompt,
   settings,
-  client = getPdfVisionClientConfig(settings),
+  client = getPdfVisualQuestionClientConfig(settings),
   maxTokens
 }: {
   pageImages: PdfPageImage[];
   supplementalImageDataUrls?: string[];
   prompt: string;
   settings: Settings;
-  client?: VisionClientConfig;
+  client?: FeatureModelClientConfig;
   maxTokens: number;
 }): Promise<string> {
   const apiKey = client.apiKey;
@@ -618,7 +620,7 @@ async function requestPdfVision({
     throw new Error(client.missingApiKeyMessage);
   }
 
-  const pdfEndpoint = client.endpoint.trim();
+  const pdfEndpoint = getChatCompletionsEndpoint(client.endpoint);
   const pdfModel = client.model.trim();
   if (!pdfEndpoint) {
     throw new Error(client.missingEndpointMessage);
@@ -682,15 +684,44 @@ async function requestPdfVision({
   return stripCodeFence(answer);
 }
 
-function getPdfVisionClientConfig(settings: Settings): VisionClientConfig {
-  return {
-    apiKey: getActivePdfApiKey(settings),
-    endpoint: settings.pdfEndpoint,
-    model: settings.pdfModel,
-    missingApiKeyMessage: "Missing PDF API key. Open the extension settings and add your PDF API key.",
-    missingEndpointMessage: "Missing PDF endpoint. Open the extension settings and add your PDF endpoint.",
-    missingModelMessage: "Missing PDF parsing model. Open the extension settings and add a PDF parsing model."
-  };
+function getArticleAnalysisClientConfig(settings: Settings): FeatureModelClientConfig {
+  return getFeatureModelClientConfig(settings, "articleAnalysis", "text", {
+    missingApiKeyMessage: "Missing article analysis API key. Open settings and add the selected model API key.",
+    missingEndpointMessage: "Missing article analysis endpoint. Open settings and add the selected model endpoint.",
+    missingModelMessage: "Missing article analysis model. Open settings and choose a model."
+  });
+}
+
+function getArticleQuestionClientConfig(settings: Settings): FeatureModelClientConfig {
+  return getFeatureModelClientConfig(settings, "articleQuestion", "text", {
+    missingApiKeyMessage: "Missing article Q&A API key. Open settings and add the selected model API key.",
+    missingEndpointMessage: "Missing article Q&A endpoint. Open settings and add the selected model endpoint.",
+    missingModelMessage: "Missing article Q&A model. Open settings and choose a model."
+  });
+}
+
+function getPdfVisualAnalysisClientConfig(settings: Settings): FeatureModelClientConfig {
+  return getFeatureModelClientConfig(settings, "pdfVisualAnalysis", "multimodal", {
+    missingApiKeyMessage: "Missing PDF image analysis API key. Open settings and add the selected multimodal model API key.",
+    missingEndpointMessage: "Missing PDF image analysis endpoint. Open settings and add the selected model endpoint.",
+    missingModelMessage: "Missing PDF image analysis model. Open settings and choose a multimodal model."
+  });
+}
+
+function getPdfVisualQuestionClientConfig(settings: Settings): FeatureModelClientConfig {
+  return getFeatureModelClientConfig(settings, "pdfVisualQuestion", "multimodal", {
+    missingApiKeyMessage: "Missing PDF image Q&A API key. Open settings and add the selected multimodal model API key.",
+    missingEndpointMessage: "Missing PDF image Q&A endpoint. Open settings and add the selected model endpoint.",
+    missingModelMessage: "Missing PDF image Q&A model. Open settings and choose a multimodal model."
+  });
+}
+
+function getDeepPdfAnalysisClientConfig(settings: Settings): FeatureModelClientConfig {
+  return getFeatureModelClientConfig(settings, "pdfDeepAnalysis", "text", {
+    missingApiKeyMessage: "Missing deep PDF analysis API key. Open settings and add the selected summary model API key.",
+    missingEndpointMessage: "Missing deep PDF analysis endpoint. Open settings and add the selected summary model endpoint.",
+    missingModelMessage: "Missing deep PDF analysis model. Open settings and choose a summary model."
+  });
 }
 
 function buildPdfGuidePrompt({

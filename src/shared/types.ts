@@ -7,7 +7,23 @@ export const DEEP_PDF_GEOMETRY_VERSION = 4;
 export type ProviderConfig = {
   endpoint: string;
   model: string;
+  isMultimodal?: boolean;
 };
+
+export type ModelConfig = {
+  name: string;
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  isMultimodal: boolean;
+};
+
+export type FeatureModelKey =
+  | "articleAnalysis"
+  | "articleQuestion"
+  | "pdfVisualAnalysis"
+  | "pdfVisualQuestion"
+  | "pdfDeepAnalysis";
 
 export type Settings = {
   providerId: string;
@@ -28,11 +44,8 @@ export type Settings = {
   deepPdfSummaryProviderConfigs: Record<string, ProviderConfig>;
   deepPdfSummaryEndpoint: string;
   deepPdfSummaryModel: string;
-  deepPdfVisionProviderId: string;
-  deepPdfVisionApiKeys: Record<string, string>;
-  deepPdfVisionProviderConfigs: Record<string, ProviderConfig>;
-  deepPdfVisionEndpoint: string;
-  deepPdfVisionModel: string;
+  modelConfigs: Record<string, ModelConfig>;
+  featureModelSelections: Partial<Record<FeatureModelKey, string>>;
   outputLanguage: OutputLanguage;
 };
 
@@ -139,13 +152,14 @@ export type ContentRequest =
   | { type: "LEARN_PANEL_GET_ACTIVE_SECTION" }
   | { type: "LEARN_PANEL_GET_ACTIVE_PDF_PAGE" }
   | { type: "LEARN_PANEL_GET_ACTIVE_DEEP_PDF_SECTION" }
-  | { type: "LEARN_PANEL_SCROLL_TO_PDF_PAGE"; page: number }
+  | { type: "LEARN_PANEL_SCROLL_TO_PDF_PAGE"; page: number; scrollBehavior?: ScrollBehavior }
   | {
       type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS";
       sectionId: string;
       blocks: DeepPdfBlock[];
       pageBboxes?: Record<number, PdfBoundingBox>;
       targetPage?: number;
+      scrollBehavior?: ScrollBehavior;
     }
   | { type: "LEARN_PANEL_REMOVE_PDF_SELECTION_REFERENCE"; referenceLabel: string }
   | { type: "LEARN_VIEWER_FOCUS_PDF_SECTION"; sectionId: string }

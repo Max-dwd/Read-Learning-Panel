@@ -38,6 +38,16 @@ h1 {
   margin: 0;
 }
 
+h2,
+p {
+  margin: 0;
+}
+
+h2 {
+  font-size: 16px;
+  line-height: 1.35;
+}
+
 form {
   background: #fff;
   border: 1px solid #dde3ee;
@@ -47,6 +57,78 @@ form {
   flex-direction: column;
   gap: 18px;
   padding: 20px;
+}
+
+.settings-tabs {
+  background: #e9eef7;
+  border: 1px solid #d8e0ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: 1fr 1fr;
+  padding: 4px;
+}
+
+.settings-tabs button {
+  background: transparent;
+  color: #526173;
+  min-height: 36px;
+}
+
+.settings-tabs button.active {
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(30, 42, 62, 0.08);
+  color: #1f3f8a;
+}
+
+.settings-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.model-list-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.model-add-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.model-list-header p,
+.empty-models p {
+  color: #526173;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.model-card-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.empty-models {
+  align-items: flex-start;
+  border: 1px dashed #cfd7e6;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
 }
 
 fieldset {
@@ -72,10 +154,22 @@ legend {
   gap: 7px;
 }
 
-.field span {
+.field span,
+.checkbox-field span {
   color: #3c4655;
   font-size: 13px;
   font-weight: 700;
+}
+
+.checkbox-field {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.checkbox-field input {
+  min-height: 0;
+  width: 16px;
 }
 
 input,
@@ -110,6 +204,16 @@ button {
   font-weight: 700;
   min-height: 40px;
   padding: 0 16px;
+}
+
+.secondary-button {
+  background: #edf2fb;
+  color: #1f3f8a;
+}
+
+.danger-button {
+  background: #f7e5e5;
+  color: #9f1f1f;
 }
 
 footer span {

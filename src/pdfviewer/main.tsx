@@ -164,7 +164,7 @@ function App() {
       }
 
       if (request.type === "LEARN_PANEL_SCROLL_TO_PDF_PAGE") {
-        scrollToPageRef.current(request.page);
+        scrollToPageRef.current(request.page, request.scrollBehavior);
         sendResponse({ ok: true });
         return false;
       }
@@ -186,7 +186,7 @@ function App() {
         });
         const targetPage = request.targetPage ?? request.blocks.find((block) => block.bbox)?.page;
         if (targetPage) {
-          scrollToPageRef.current(targetPage);
+          scrollToPageRef.current(targetPage, request.scrollBehavior);
         }
         sendResponse({ ok: true });
         return false;
@@ -348,9 +348,9 @@ function App() {
     }
   }
 
-  function scrollToPage(page: number) {
+  function scrollToPage(page: number, behavior: ScrollBehavior = "smooth") {
     const el = pageRefs.current.get(page);
-    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    el?.scrollIntoView({ behavior, block: "start" });
   }
 
   function handleBlockClick(block: DeepPdfBlock, targetSectionId: string, event: React.MouseEvent<HTMLButtonElement>) {

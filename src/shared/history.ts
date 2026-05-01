@@ -11,6 +11,7 @@ export type HistoryEntry = {
   deepPdfParse?: DeepPdfParseResult;
   deepPdfAnalysis?: AnalysisResult | null;
   deepPdfFollowUps?: Record<string, SectionFollowUp[]>;
+  markdown?: string;
   createdAt: number;
   updatedAt: number;
   scrollPos?: number;
@@ -56,8 +57,8 @@ export async function saveHistoryEntry(entry: {
   const nextEntry: HistoryEntry = {
     id: existing?.id ?? buildHistoryId(urlKey),
     article: trimArticleForStorage(entry.article),
-    analysis: entry.analysis,
-    followUps: entry.followUps,
+    analysis: entry.analysis ?? existing?.analysis ?? null,
+    followUps: Object.keys(entry.followUps).length > 0 ? entry.followUps : existing?.followUps ?? {},
     deepPdfParse: entry.deepPdfParse === undefined ? existing?.deepPdfParse : entry.deepPdfParse ?? undefined,
     deepPdfAnalysis: entry.deepPdfAnalysis === undefined ? existing?.deepPdfAnalysis : entry.deepPdfAnalysis,
     deepPdfFollowUps: entry.deepPdfFollowUps === undefined ? existing?.deepPdfFollowUps : entry.deepPdfFollowUps,
@@ -65,6 +66,7 @@ export async function saveHistoryEntry(entry: {
     updatedAt: now,
     scrollPos: entry.scrollPos ?? existing?.scrollPos
   };
+  nextEntry.markdown = buildHistoryMarkdown(nextEntry);
 
   const nextHistory = [nextEntry, ...history.filter((item) => getHistoryEntryUrlKey(item.article.url) !== urlKey)]
     .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -93,10 +95,12 @@ export async function importHistoryEntry(value: unknown): Promise<HistoryEntry[]
     deepPdfParse: imported.deepPdfParse ?? existing?.deepPdfParse,
     deepPdfAnalysis: imported.deepPdfAnalysis ?? existing?.deepPdfAnalysis,
     deepPdfFollowUps: imported.deepPdfFollowUps ?? existing?.deepPdfFollowUps,
+    markdown: imported.markdown ?? existing?.markdown,
     createdAt: existing?.createdAt ?? imported.createdAt ?? now,
     updatedAt: now,
     scrollPos: imported.scrollPos ?? existing?.scrollPos
   };
+  nextEntry.markdown = buildHistoryMarkdown(nextEntry);
 
   const nextHistory = [nextEntry, ...history.filter((item) => getHistoryEntryUrlKey(item.article.url) !== urlKey)]
     .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -150,21 +154,21 @@ function dedupeHistory(entries: HistoryEntry[]): HistoryEntry[] {
 
 function migratePdfHistoryEntry(entry: HistoryEntry): HistoryEntry {
   if (entry.article.siteName !== "PDF Deep") {
-    return entry;
+    return withHistoryMarkdown(entry);
   }
 
-  return {
+  return withHistoryMarkdown({
     ...entry,
     analysis: null,
     followUps: {},
     deepPdfAnalysis: entry.deepPdfAnalysis ?? entry.analysis,
     deepPdfFollowUps: entry.deepPdfFollowUps ?? entry.followUps
-  };
+  });
 }
 
 function mergeHistoryEntries(primary: HistoryEntry, secondary: HistoryEntry): HistoryEntry {
   const secondaryIsVisualPdf = secondary.article.siteName === "PDF";
-  return {
+  return withHistoryMarkdown({
     ...primary,
     article: primary.article.siteName === "PDF Deep" && secondaryIsVisualPdf ? secondary.article : primary.article,
     analysis: primary.analysis ?? secondary.analysis,
@@ -175,7 +179,7 @@ function mergeHistoryEntries(primary: HistoryEntry, secondary: HistoryEntry): Hi
     createdAt: Math.min(primary.createdAt, secondary.createdAt),
     updatedAt: Math.max(primary.updatedAt, secondary.updatedAt),
     scrollPos: primary.scrollPos ?? secondary.scrollPos
-  };
+  });
 }
 
 function trimArticleForStorage(article: ExtractedArticle): ExtractedArticle {
@@ -205,10 +209,144 @@ function normalizeImportedHistoryEntry(value: unknown): HistoryEntry | null {
     deepPdfParse: isDeepPdfParseResult(candidate.deepPdfParse) ? candidate.deepPdfParse : undefined,
     deepPdfAnalysis: isAnalysisResult(candidate.deepPdfAnalysis) ? candidate.deepPdfAnalysis : undefined,
     deepPdfFollowUps: Object.keys(deepPdfFollowUps).length > 0 ? deepPdfFollowUps : undefined,
+    markdown: typeof candidate.markdown === "string" ? candidate.markdown : undefined,
     createdAt: candidate.createdAt,
     updatedAt: candidate.updatedAt,
     scrollPos: typeof candidate.scrollPos === "number" ? candidate.scrollPos : undefined
   };
+}
+
+function withHistoryMarkdown(entry: HistoryEntry): HistoryEntry {
+  return {
+    ...entry,
+    markdown: buildHistoryMarkdown(entry)
+  };
+}
+
+export function buildHistoryMarkdown(entry: HistoryEntry): string {
+  const lines: string[] = [];
+  lines.push(`# ${entry.article.title}`);
+  lines.push(`URL: ${entry.article.url}`);
+  lines.push("");
+
+  if (entry.analysis || hasFollowUps(entry.followUps)) {
+    lines.push("## 图片解析");
+    appendAnalysisMarkdown(lines, entry.article.sections, entry.analysis, entry.followUps);
+  }
+
+  if (entry.deepPdfParse) {
+    lines.push("## 深度解析");
+    lines.push(`Pages: ${entry.deepPdfParse.pageRange || "all"}`);
+    lines.push(`Blocks: ${entry.deepPdfParse.blocks.length}`);
+    lines.push("");
+    appendDeepPdfMarkdown(
+      lines,
+      entry.deepPdfParse,
+      entry.deepPdfAnalysis ?? null,
+      entry.deepPdfFollowUps ?? {}
+    );
+  }
+
+  if (lines.length <= 3) {
+    lines.push("No generated analysis has been saved yet.");
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+function appendAnalysisMarkdown(
+  lines: string[],
+  sections: ExtractedArticle["sections"],
+  analysis: AnalysisResult | null,
+  followUps: Record<string, SectionFollowUp[]>
+) {
+  const analysisBySection = new Map((analysis?.sections ?? []).map((section) => [section.id, section]));
+
+  if (analysis?.overall.summary || analysis?.overall.why_read) {
+    lines.push("### Overall");
+    if (analysis.overall.summary) {
+      lines.push(`**Summary:** ${analysis.overall.summary}`);
+    }
+    if (analysis.overall.why_read) {
+      lines.push(`**Why read:** ${analysis.overall.why_read}`);
+    }
+    lines.push("");
+  }
+
+  for (const section of sections) {
+    const sectionAnalysis = analysisBySection.get(section.id);
+    const sectionFollowUps = followUps[section.id] ?? [];
+    if (!sectionAnalysis && sectionFollowUps.length === 0) {
+      continue;
+    }
+
+    lines.push(`### ${sectionAnalysis?.title || section.title}`);
+    appendSectionAnalysisMarkdown(lines, sectionAnalysis);
+    appendFollowUpsMarkdown(lines, sectionFollowUps);
+    lines.push("");
+  }
+}
+
+function appendDeepPdfMarkdown(
+  lines: string[],
+  parse: DeepPdfParseResult,
+  analysis: AnalysisResult | null,
+  followUps: Record<string, SectionFollowUp[]>
+) {
+  const analysisBySection = new Map((analysis?.sections ?? []).map((section) => [section.id, section]));
+
+  if (analysis?.overall.summary || analysis?.overall.why_read) {
+    lines.push("### Overall");
+    if (analysis.overall.summary) {
+      lines.push(`**Summary:** ${analysis.overall.summary}`);
+    }
+    if (analysis.overall.why_read) {
+      lines.push(`**Why read:** ${analysis.overall.why_read}`);
+    }
+    lines.push("");
+  }
+
+  for (const section of parse.sections) {
+    const sectionAnalysis = analysisBySection.get(section.id);
+    lines.push(`### ${sectionAnalysis?.title || section.title || `Page ${section.pageStart}`}`);
+    appendSectionAnalysisMarkdown(lines, sectionAnalysis);
+    if (!sectionAnalysis && section.text) {
+      lines.push(`**Parsed text:** ${truncateMarkdownText(section.text, 2000)}`);
+    }
+    appendFollowUpsMarkdown(lines, followUps[section.id] ?? []);
+    lines.push("");
+  }
+}
+
+function appendSectionAnalysisMarkdown(lines: string[], section: AnalysisResult["sections"][number] | undefined) {
+  if (!section) {
+    return;
+  }
+  lines.push(`**Summary:** ${section.summary}`);
+  lines.push(`**Interpretation:** ${section.interpretation}`);
+  lines.push(`**Role:** ${section.role_in_article}`);
+}
+
+function appendFollowUpsMarkdown(lines: string[], followUps: SectionFollowUp[]) {
+  if (followUps.length === 0) {
+    return;
+  }
+
+  lines.push("");
+  lines.push("#### Q&A");
+  for (const followUp of followUps) {
+    lines.push(`**Q:** ${followUp.question}`);
+    lines.push(`**A:** ${followUp.answer}`);
+    lines.push("");
+  }
+}
+
+function hasFollowUps(followUps: Record<string, SectionFollowUp[]>): boolean {
+  return Object.values(followUps).some((items) => items.length > 0);
+}
+
+function truncateMarkdownText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength).trimEnd()}...` : value;
 }
 
 function getHistoryEntryCandidate(value: unknown): unknown {

@@ -10,6 +10,7 @@ import {
   type SectionAnalysisSessionState
 } from "../shared/analysisSession";
 import {
+  buildHistoryMarkdown,
   clearHistory,
   deleteHistoryEntry,
   findHistoryEntry,
@@ -51,7 +52,14 @@ import {
   type LoadedPdfDocument,
   type PdfPageImage
 } from "../shared/pdf";
-import { getActiveApiKey, getActiveDeepPdfSummaryApiKey, getActivePdfApiKey, loadSettings } from "../shared/settings";
+import {
+  getConfiguredModelChoices,
+  getFeatureModelChoice,
+  hasUsableFeatureModel,
+  loadSettings,
+  saveSettings,
+  type ConfiguredModelChoice
+} from "../shared/settings";
 import type {
   AnalysisResult,
   ContentRequest,
@@ -60,6 +68,7 @@ import type {
   DeepPdfParseResult,
   DeepPdfSection,
   ExtractedArticle,
+  FeatureModelKey,
   PdfAnalysisMode,
   PdfGuideResult,
   PdfSelectionReference,
@@ -191,6 +200,7 @@ function App() {
   const pdfPreviewVersionRef = useRef(0);
   const analysisVersionRef = useRef(0);
   const analysisStateRef = useRef<AnalyzeState>("idle");
+  const historyWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const runningSectionIdRef = useRef<string | null>(null);
   const followEnabledRef = useRef(false);
   const currentArticleUrlRef = useRef<string | null>(null);
@@ -703,6 +713,7 @@ function App() {
       requestedDeepRange === null
         ? getPdfDeepParse(persistedPdfHistory?.deepPdfParse, loadedPdf.sourceUrl)
         : getMatchingDeepPdfParse(persistedPdfHistory?.deepPdfParse, loadedPdf.sourceUrl, requestedDeepRange);
+    hydrateVisualPdfHistorySnapshot(pdfArticle, persistedPdfHistory, savedGuideAnalysis);
     const savedDeepParse = storedDeepParse ?? historyDeepParse;
     if (!storedDeepParse && historyDeepParse) {
       void saveDeepPdfParse(historyDeepParse.sourceUrl, historyDeepParse.pageRange, historyDeepParse);
@@ -743,28 +754,13 @@ function App() {
           });
           applyPage(restoredArticle, restoredAnalysis, pageKey);
           if (persisted.article.siteName === "PDF Deep" || (!persisted.analysis && savedGuideAnalysis)) {
-            setHistory(
-              await saveHistoryEntry({
-                article: restoredArticle,
-                analysis: restoredAnalysis,
-                followUps: persisted.followUps,
-                deepPdfParse: persisted.deepPdfParse,
-                scrollPos: persisted.scrollPos
-              })
-            );
+            await persistAnalysisHistorySnapshot(restoredArticle, restoredAnalysis, persisted.followUps, persisted.deepPdfParse, persisted.scrollPos);
           }
         } else {
           cacheRef.current.set(pageKey, { article: pdfArticle, analysis: savedGuideAnalysis, followUps: {} });
           applyPage(pdfArticle, savedGuideAnalysis, pageKey);
           if (savedGuideAnalysis) {
-            setHistory(
-              await saveHistoryEntry({
-                article: pdfArticle,
-                analysis: savedGuideAnalysis,
-                followUps: {},
-                deepPdfParse: savedDeepParse
-              })
-            );
+            await persistAnalysisHistorySnapshot(pdfArticle, savedGuideAnalysis, {}, savedDeepParse);
           }
         }
       }
@@ -804,6 +800,104 @@ function App() {
 
   async function refreshHistory() {
     setHistory(await loadHistory());
+  }
+
+  function enqueueHistorySave(buildEntry: () => Promise<Parameters<typeof saveHistoryEntry>[0]>): Promise<void> {
+    const nextWrite = historyWriteQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const nextHistory = await saveHistoryEntry(await buildEntry());
+        setHistory(nextHistory);
+      });
+    historyWriteQueueRef.current = nextWrite;
+    void nextWrite.catch(() => undefined);
+    return nextWrite;
+  }
+
+  function persistAnalysisHistorySnapshot(
+    nextArticle: ExtractedArticle,
+    nextAnalysis: AnalysisResult | null,
+    nextFollowUps: Record<string, SectionFollowUp[]>,
+    nextDeepPdfParse?: DeepPdfParseResult | null,
+    scrollPos?: number
+  ): Promise<void> {
+    const historyArticle = getSharedHistoryArticle(nextArticle);
+    const isDeepPdfArticle = nextArticle.siteName === "PDF Deep";
+
+    return enqueueHistorySave(async () => {
+      const existingSharedHistory =
+        nextArticle.siteName === "PDF" || nextArticle.siteName === "PDF Deep"
+          ? await findHistoryEntry(historyArticle.url)
+          : null;
+      const visualCache = isDeepPdfArticle ? getVisualPdfCacheSnapshot(historyArticle) : null;
+
+      return {
+        article: historyArticle,
+        analysis: isDeepPdfArticle ? existingSharedHistory?.analysis ?? visualCache?.analysis ?? null : nextAnalysis,
+        followUps: isDeepPdfArticle ? existingSharedHistory?.followUps ?? visualCache?.followUps ?? {} : nextFollowUps,
+        deepPdfParse: nextDeepPdfParse,
+        deepPdfAnalysis: isDeepPdfArticle ? nextAnalysis : undefined,
+        deepPdfFollowUps: isDeepPdfArticle ? nextFollowUps : undefined,
+        scrollPos
+      };
+    });
+  }
+
+  function getVisualPdfCacheSnapshot(historyArticle: ExtractedArticle): {
+    analysis: AnalysisResult | null;
+    followUps: Record<string, SectionFollowUp[]>;
+  } | null {
+    const visualPageKey = getPageKey(getHistoryEntryUrlKey(historyArticle.url));
+    const cached = cacheRef.current.get(visualPageKey);
+    if (!cached || cached.article.siteName !== "PDF") {
+      return null;
+    }
+
+    return {
+      analysis: cached.analysis,
+      followUps: cached.followUps
+    };
+  }
+
+  function hydrateVisualPdfHistorySnapshot(
+    pdfArticle: ExtractedArticle,
+    persisted: HistoryEntry | null,
+    savedGuideAnalysis: AnalysisResult | null
+  ) {
+    const pageKey = getPageKey(pdfArticle.url);
+    const existing = cacheRef.current.get(pageKey);
+    const restoredAnalysis = existing?.analysis ?? persisted?.analysis ?? savedGuideAnalysis;
+    const restoredFollowUps =
+      existing?.followUps ??
+      (persisted?.article.siteName === "PDF" || persisted?.article.siteName === "PDF Deep" ? persisted.followUps : undefined) ??
+      {};
+    const restoredScrollPos = existing?.scrollPos ?? persisted?.scrollPos;
+
+    if (!restoredAnalysis && Object.keys(restoredFollowUps).length === 0 && restoredScrollPos === undefined) {
+      return;
+    }
+
+    cacheRef.current.set(pageKey, {
+      article: persisted?.article.siteName === "PDF" ? persisted.article : pdfArticle,
+      analysis: restoredAnalysis,
+      followUps: restoredFollowUps,
+      scrollPos: restoredScrollPos
+    });
+  }
+
+  function updateFeatureModelSelection(featureKey: FeatureModelKey, modelChoiceId: string) {
+    if (!settings) {
+      return;
+    }
+    const nextSettings: Settings = {
+      ...settings,
+      featureModelSelections: {
+        ...settings.featureModelSelections,
+        [featureKey]: modelChoiceId
+      }
+    };
+    setSettings(nextSettings);
+    void saveSettings(nextSettings);
   }
 
   function saveCurrentScrollPosition() {
@@ -951,6 +1045,13 @@ function App() {
           result = { ...result, overall: event.overall };
           latestAnalysis = result;
           updateCachedAnalysis(pageKey, articleForAnalysis, result, latestSectionState, {}, "running");
+          void persistAnalysisHistorySnapshot(
+            articleForAnalysis,
+            result,
+            cacheRef.current.get(pageKey)?.followUps ?? {},
+            targetDeepPdfParse,
+            cacheRef.current.get(pageKey)?.scrollPos
+          );
           void saveAnalysisSession({
             pageKey,
             url: articleForAnalysis.url,
@@ -982,6 +1083,13 @@ function App() {
           ...(nextSection ? { [nextSection.id]: "running" as const } : {})
         };
         updateCachedAnalysis(pageKey, articleForAnalysis, result, latestSectionState, {}, "running");
+        void persistAnalysisHistorySnapshot(
+          articleForAnalysis,
+          result,
+          cacheRef.current.get(pageKey)?.followUps ?? {},
+          targetDeepPdfParse,
+          cacheRef.current.get(pageKey)?.scrollPos
+        );
         void saveAnalysisSession({
           pageKey,
           url: articleForAnalysis.url,
@@ -1040,22 +1148,13 @@ function App() {
       });
       await deleteAnalysisSession(pageKey);
       syncSharedPdfCaches(articleForAnalysis.url, result, nextFollowUps, cacheRef.current.get(pageKey)?.scrollPos);
-      const historyArticle = getSharedHistoryArticle(articleForAnalysis);
-      const existingSharedHistory =
-        articleForAnalysis.siteName === "PDF" || articleForAnalysis.siteName === "PDF Deep"
-          ? await findHistoryEntry(historyArticle.url)
-          : null;
-      const isDeepPdfAnalysis = articleForAnalysis.siteName === "PDF Deep";
-      const nextHistory = await saveHistoryEntry({
-        article: historyArticle,
-        analysis: isDeepPdfAnalysis ? existingSharedHistory?.analysis ?? null : result,
-        followUps: isDeepPdfAnalysis ? existingSharedHistory?.followUps ?? {} : nextFollowUps,
-        deepPdfParse: targetDeepPdfParse ?? undefined,
-        deepPdfAnalysis: isDeepPdfAnalysis ? result : undefined,
-        deepPdfFollowUps: isDeepPdfAnalysis ? nextFollowUps : undefined,
-        scrollPos: cacheRef.current.get(pageKey)?.scrollPos
-      });
-      setHistory(nextHistory);
+      await persistAnalysisHistorySnapshot(
+        articleForAnalysis,
+        result,
+        nextFollowUps,
+        targetDeepPdfParse,
+        cacheRef.current.get(pageKey)?.scrollPos
+      );
       if (currentPageKeyRef.current === pageKey) {
         runningSectionIdRef.current = null;
         setAnalysis(result);
@@ -1072,6 +1171,13 @@ function App() {
         latestSectionState = { ...latestSectionState, [runningSectionId]: "error" };
       }
       updateCachedAnalysis(pageKey, articleForAnalysis, latestAnalysis, latestSectionState, nextSectionErrors, "error", typedError.message, typedError.raw ?? "");
+      void persistAnalysisHistorySnapshot(
+        articleForAnalysis,
+        latestAnalysis,
+        cacheRef.current.get(pageKey)?.followUps ?? {},
+        targetDeepPdfParse,
+        cacheRef.current.get(pageKey)?.scrollPos
+      );
       void saveAnalysisSession({
         pageKey,
         url: articleForAnalysis.url,
@@ -1214,15 +1320,7 @@ function App() {
         setAnalysisState("done");
       }
       syncSharedPdfCaches(pdfArticle.url, guideAnalysis, nextFollowUps, cacheRef.current.get(pageKey)?.scrollPos);
-      const historyArticle = getSharedHistoryArticle(pdfArticle);
-      const nextHistory = await saveHistoryEntry({
-        article: historyArticle,
-        analysis: guideAnalysis,
-        followUps: nextFollowUps,
-        deepPdfParse,
-        scrollPos: cacheRef.current.get(pageKey)?.scrollPos
-      });
-      setHistory(nextHistory);
+      await persistAnalysisHistorySnapshot(pdfArticle, guideAnalysis, nextFollowUps, deepPdfParse, cacheRef.current.get(pageKey)?.scrollPos);
     } catch (error) {
       const typedError = error as Error & { raw?: string };
       setPdfGuideState("error");
@@ -1263,14 +1361,7 @@ function App() {
       const preservedDeepFollowUps = existingSharedHistory?.deepPdfFollowUps ?? {};
       cacheRef.current.set(parsedPageKey, { article: parsedArticle, analysis: preservedDeepAnalysis, followUps: preservedDeepFollowUps });
       syncSharedPdfCaches(parsedArticle.url, preservedDeepAnalysis, preservedDeepFollowUps);
-      const historyArticle = getSharedHistoryArticle(parsedArticle);
-      const nextHistory = await saveHistoryEntry({
-        article: historyArticle,
-        analysis: preservedAnalysis,
-        followUps: preservedFollowUps,
-        deepPdfParse: result
-      });
-      setHistory(nextHistory);
+      await persistAnalysisHistorySnapshot(parsedArticle, preservedDeepAnalysis, preservedDeepFollowUps, result);
       await applyDeepPdfParse(result);
       return result;
     } catch (error) {
@@ -1308,11 +1399,43 @@ function App() {
     await runAnalysis(buildDeepPdfArticle(result), getDeepPdfPageKey(result.sourceUrl, result.pageRange), result);
   }
 
+  function getCurrentPdfFocusPage() {
+    const page = Number(pdfTargetPage);
+    if (Number.isInteger(page) && page > 0) {
+      return Math.min(page, pdfDocumentRef.current?.pageCount ?? page);
+    }
+
+    if (pdfAnalysisMode === "deep" && deepPdfParse && activeDeepPdfSectionId) {
+      const section = deepPdfParse.sections.find((candidate) => candidate.id === activeDeepPdfSectionId);
+      return section?.pageStart ?? 1;
+    }
+
+    return 1;
+  }
+
+  function scrollPanelToSectionSoon(sectionId: string) {
+    const token = beginScrollSaveSuppression();
+    window.setTimeout(() => {
+      scrollPanelToSection(sectionId, "instant");
+      window.setTimeout(() => releaseScrollSaveSuppression(token), 180);
+    }, 80);
+  }
+
+  function scrollPanelToPdfPageSoon(page: number) {
+    const token = beginScrollSaveSuppression();
+    window.setTimeout(() => {
+      scrollPanelToPdfPage(page, "instant");
+      window.setTimeout(() => releaseScrollSaveSuppression(token), 180);
+    }, 80);
+  }
+
   function switchPdfAnalysisMode(mode: PdfAnalysisMode) {
+    if (mode === pdfAnalysisMode) {
+      return;
+    }
+
+    const focusPage = getCurrentPdfFocusPage();
     setPdfAnalysisMode(mode);
-    setActiveDeepPdfSectionId(null);
-    setShowAllDeepPdfBoundingBoxes(false);
-    void sendToViewer({ type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS", sectionId: "", blocks: [] }).catch(() => undefined);
 
     const loadedPdf = pdfDocumentRef.current;
     if (!loadedPdf) {
@@ -1320,6 +1443,9 @@ function App() {
     }
 
     if (mode === "visual") {
+      setActiveDeepPdfSectionId(null);
+      setShowAllDeepPdfBoundingBoxes(false);
+      void sendToViewer({ type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS", sectionId: "", blocks: [] }).catch(() => undefined);
       const pdfArticle = buildPdfArticle(loadedPdf);
       const pageKey = getPageKey(pdfArticle.url);
       const cached = cacheRef.current.get(pageKey);
@@ -1330,6 +1456,10 @@ function App() {
         cacheRef.current.set(pageKey, { article: pdfArticle, analysis: guideAnalysis, followUps: {} });
         applyPage(pdfArticle, guideAnalysis, pageKey);
       }
+      const visualPage = getNearestRenderedPdfPage(focusPage, pdfPageImages, loadedPdf.pageCount);
+      setPdfTargetPage(String(visualPage));
+      scrollPanelToPdfPageSoon(visualPage);
+      void sendToViewer({ type: "LEARN_PANEL_SCROLL_TO_PDF_PAGE", page: visualPage, scrollBehavior: "instant" }).catch(() => undefined);
       return;
     }
 
@@ -1341,14 +1471,19 @@ function App() {
     }
 
     if (deepPdfParse && deepPdfParse.pageRange === currentDatalabPageRange) {
-      void applyDeepPdfParse(deepPdfParse, { restoreSaved: true });
+      void applyDeepPdfParse(deepPdfParse, { restoreSaved: true }).then(() => {
+        focusDeepPdfPage(deepPdfParse, focusPage, { scrollPanel: true });
+      });
       return;
     }
 
-    void loadSavedDeepPdfForCurrentRange(loadedPdf, { clearOnMiss: true });
+    void loadSavedDeepPdfForCurrentRange(loadedPdf, { clearOnMiss: true, focusPage });
   }
 
-  async function loadSavedDeepPdfForCurrentRange(loadedPdf: LoadedPdfDocument, options: { clearOnMiss?: boolean } = {}) {
+  async function loadSavedDeepPdfForCurrentRange(
+    loadedPdf: LoadedPdfDocument,
+    options: { clearOnMiss?: boolean; focusPage?: number } = {}
+  ) {
     try {
       const pages = parsePdfPageRange(pdfPageRange, loadedPdf.pageCount);
       const datalabPageRange = toDatalabPageRange(pages, loadedPdf.pageCount);
@@ -1358,6 +1493,9 @@ function App() {
         setDeepPdfParseState("done");
         setDeepPdfParseStatus(`Loaded saved deep parse${datalabPageRange ? ` for pages ${formatPages(pages)}` : ""}.`);
         await applyDeepPdfParse(saved, { restoreSaved: true });
+        if (options.focusPage) {
+          focusDeepPdfPage(saved, options.focusPage, { scrollPanel: true });
+        }
         return;
       }
     } catch {
@@ -1437,9 +1575,9 @@ function App() {
     });
   }
 
-  function focusDeepPdfSection(section: DeepPdfSection, options: { scrollToPage?: boolean } = {}) {
+  function focusDeepPdfSection(section: DeepPdfSection, options: { scrollToPage?: boolean; targetPage?: number; scrollPanel?: boolean } = {}) {
     setActiveDeepPdfSectionId(section.id);
-    const firstBlockPage = section.blocks[0]?.page ?? section.pageStart;
+    const firstBlockPage = getDeepPdfSectionTargetPage(section, options.targetPage);
     void sendToViewer({
       type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS",
       sectionId: section.id,
@@ -1448,6 +1586,31 @@ function App() {
       targetPage: options.scrollToPage ? firstBlockPage : undefined
     }).catch(() => undefined);
     setPdfTargetPage(String(firstBlockPage));
+    if (options.scrollPanel) {
+      scrollPanelToSectionSoon(section.id);
+    }
+  }
+
+  function focusDeepPdfPage(result: DeepPdfParseResult, page: number, options: { scrollPanel?: boolean } = {}) {
+    const section = getNearestDeepPdfSectionForPage(result, page);
+    if (!section) {
+      return;
+    }
+
+    setActiveDeepPdfSectionId(section.id);
+    const targetPage = getDeepPdfSectionTargetPage(section, page);
+    void sendToViewer({
+      type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS",
+      sectionId: section.id,
+      blocks: showAllDeepPdfBoundingBoxes ? getDeepPdfBlocksForViewer(result) : tagDeepPdfSectionBlocks(section),
+      pageBboxes: result.pageBboxes,
+      targetPage,
+      scrollBehavior: "instant"
+    }).catch(() => undefined);
+    setPdfTargetPage(String(targetPage));
+    if (options.scrollPanel) {
+      scrollPanelToSectionSoon(section.id);
+    }
   }
 
   async function getDeepPdfFollowSection(
@@ -1618,8 +1781,9 @@ function App() {
     const existingEntry = history.find((entry) => getHistoryEntryUrlKey(entry.article.url) === articleUrlKey);
     const exportDeepPdfParse = getExportableDeepPdfParse(article, deepPdfParse, existingEntry?.deepPdfParse);
     const isCurrentDeepPdf = article.siteName === "PDF Deep";
-    const visualAnalysis = isCurrentDeepPdf ? existingEntry?.analysis ?? null : exportAnalysis;
-    const visualFollowUps = isCurrentDeepPdf ? existingEntry?.followUps ?? {} : followUps;
+    const visualCache = isCurrentDeepPdf ? getVisualPdfCacheSnapshot(historyArticle) : null;
+    const visualAnalysis = isCurrentDeepPdf ? existingEntry?.analysis ?? visualCache?.analysis ?? null : exportAnalysis;
+    const visualFollowUps = isCurrentDeepPdf ? existingEntry?.followUps ?? visualCache?.followUps ?? {} : followUps;
     const deepAnalysis = isCurrentDeepPdf ? exportAnalysis : existingEntry?.deepPdfAnalysis ?? null;
     const deepFollowUps = isCurrentDeepPdf ? followUps : existingEntry?.deepPdfFollowUps ?? {};
     const exportEntry: HistoryEntry = {
@@ -1634,31 +1798,27 @@ function App() {
       updatedAt: now,
       scrollPos: cacheRef.current.get(currentPageKeyRef.current)?.scrollPos
     };
+    exportEntry.markdown = buildHistoryMarkdown(exportEntry);
     const exportPayload: HistoryExportPayload = {
       schema: HISTORY_EXPORT_SCHEMA,
       version: HISTORY_EXPORT_VERSION,
       exportedAt: now,
       entry: exportEntry
     };
+    const importJson = JSON.stringify(exportPayload, null, 2);
 
     lines.push(`<!-- learn-panel-history:v1:${encodeBase64Json(exportPayload)} -->`);
     lines.push("");
-    lines.push(`# ${historyArticle.title}`);
-    lines.push(`URL: ${historyArticle.url}`);
+    lines.push(exportEntry.markdown);
     lines.push("");
 
-    if (visualAnalysis || Object.values(visualFollowUps).some((items) => items.length > 0)) {
-      lines.push("## 图片解析");
-      appendAnalysisExportSections(lines, historyArticle.sections, visualAnalysis, visualFollowUps);
-    }
-
-    if (exportDeepPdfParse) {
-      lines.push("## 深度解析");
-      lines.push(`Pages: ${exportDeepPdfParse.pageRange ? fromDatalabPageRangeLabel(exportDeepPdfParse.pageRange) : "all"}`);
-      lines.push(`Blocks: ${exportDeepPdfParse.blocks.length}`);
-      lines.push("");
-      appendDeepPdfExportSections(lines, exportDeepPdfParse, deepAnalysis, deepFollowUps);
-    }
+    lines.push("## 导入数据");
+    lines.push("保留下面这个 JSON 块，就可以从这份 Markdown 重新导入完整历史。");
+    lines.push("");
+    lines.push("```json learn-panel-history");
+    lines.push(importJson);
+    lines.push("```");
+    lines.push("");
 
     const text = lines.join("\n");
     const blob = new Blob([text], { type: "text/markdown" });
@@ -1774,19 +1934,7 @@ function App() {
         scrollPos: cacheRef.current.get(pageKey)?.scrollPos
       });
       syncSharedPdfCaches(article.url, analysis, nextFollowUps, cacheRef.current.get(pageKey)?.scrollPos);
-      const historyArticle = getSharedHistoryArticle(article);
-      const existingSharedHistory =
-        article.siteName === "PDF" || article.siteName === "PDF Deep" ? await findHistoryEntry(historyArticle.url) : null;
-      const isDeepPdfArticle = article.siteName === "PDF Deep";
-      setHistory(await saveHistoryEntry({
-        article: historyArticle,
-        analysis: isDeepPdfArticle ? existingSharedHistory?.analysis ?? null : analysis,
-        followUps: isDeepPdfArticle ? existingSharedHistory?.followUps ?? {} : nextFollowUps,
-        deepPdfParse,
-        deepPdfAnalysis: isDeepPdfArticle ? analysis : undefined,
-        deepPdfFollowUps: isDeepPdfArticle ? nextFollowUps : undefined,
-        scrollPos: cacheRef.current.get(pageKey)?.scrollPos
-      }));
+      await persistAnalysisHistorySnapshot(article, analysis, nextFollowUps, deepPdfParse, cacheRef.current.get(pageKey)?.scrollPos);
 
       if (currentPageKeyRef.current === pageKey) {
         setFollowUps(nextFollowUps);
@@ -1884,7 +2032,8 @@ function App() {
             sectionAnalysis: sectionAnalysis.get(sectionId),
             priorFollowUps: existingFollowUps,
             question,
-            settings: currentSettings
+            settings: currentSettings,
+            featureModelKey: "pdfDeepAnalysis"
           });
         }
       } else {
@@ -1932,19 +2081,7 @@ function App() {
         scrollPos: cacheRef.current.get(pageKey)?.scrollPos
       });
       syncSharedPdfCaches(article.url, analysis, nextFollowUps, cacheRef.current.get(pageKey)?.scrollPos);
-      const historyArticle = getSharedHistoryArticle(article);
-      const existingSharedHistory =
-        article.siteName === "PDF" || article.siteName === "PDF Deep" ? await findHistoryEntry(historyArticle.url) : null;
-      const isDeepPdfArticle = article.siteName === "PDF Deep";
-      setHistory(await saveHistoryEntry({
-        article: historyArticle,
-        analysis: isDeepPdfArticle ? existingSharedHistory?.analysis ?? null : analysis,
-        followUps: isDeepPdfArticle ? existingSharedHistory?.followUps ?? {} : nextFollowUps,
-        deepPdfParse,
-        deepPdfAnalysis: isDeepPdfArticle ? analysis : undefined,
-        deepPdfFollowUps: isDeepPdfArticle ? nextFollowUps : undefined,
-        scrollPos: cacheRef.current.get(pageKey)?.scrollPos
-      }));
+      await persistAnalysisHistorySnapshot(article, analysis, nextFollowUps, deepPdfParse, cacheRef.current.get(pageKey)?.scrollPos);
 
       if (currentPageKeyRef.current === pageKey) {
         setFollowUps(nextFollowUps);
@@ -2035,16 +2172,20 @@ function App() {
     setAnalysisState("idle");
   }
 
-  const needsSettings = settings ? !getActiveApiKey(settings) || !settings.model.trim() || !settings.endpoint.trim() : false;
-  const needsPdfSettings = settings
-    ? !getActivePdfApiKey(settings) || !settings.pdfModel.trim() || !settings.pdfEndpoint.trim()
-    : false;
+  const modelChoices = settings ? getConfiguredModelChoices(settings) : [];
+  const textModelChoices = modelChoices;
+  const multimodalModelChoices = modelChoices.filter((choice) => choice.isMultimodal);
+  const selectedArticleAnalysisModel = settings ? getFeatureModelChoice(settings, "articleAnalysis", "text")?.id ?? "" : "";
+  const selectedArticleQuestionModel = settings ? getFeatureModelChoice(settings, "articleQuestion", "text")?.id ?? "" : "";
+  const selectedPdfVisualAnalysisModel = settings ? getFeatureModelChoice(settings, "pdfVisualAnalysis", "multimodal")?.id ?? "" : "";
+  const selectedPdfVisualQuestionModel = settings ? getFeatureModelChoice(settings, "pdfVisualQuestion", "multimodal")?.id ?? "" : "";
+  const selectedPdfDeepAnalysisModel = settings ? getFeatureModelChoice(settings, "pdfDeepAnalysis", "text")?.id ?? "" : "";
+  const needsSettings = settings ? !hasUsableFeatureModel(settings, "articleAnalysis", "text") : false;
+  const needsArticleQuestionSettings = settings ? !hasUsableFeatureModel(settings, "articleQuestion", "text") : false;
+  const needsPdfSettings = settings ? !hasUsableFeatureModel(settings, "pdfVisualAnalysis", "multimodal") : false;
+  const needsPdfQuestionSettings = settings ? !hasUsableFeatureModel(settings, "pdfVisualQuestion", "multimodal") : false;
   const needsDeepPdfParserSettings = settings ? !settings.deepPdfParserApiKey.trim() || !settings.deepPdfParserEndpoint.trim() : false;
-  const needsDeepPdfSummarySettings = settings
-    ? !getActiveDeepPdfSummaryApiKey(settings) ||
-      !settings.deepPdfSummaryModel.trim() ||
-      !settings.deepPdfSummaryEndpoint.trim()
-    : false;
+  const needsDeepPdfSummarySettings = settings ? !hasUsableFeatureModel(settings, "pdfDeepAnalysis", "text") : false;
   const completedSectionCount = article ? article.sections.filter((section) => sectionAnalyzeState[section.id] === "done").length : 0;
   const runningSectionIndex = article?.sections.findIndex((section) => sectionAnalyzeState[section.id] === "running") ?? -1;
   const hasAnyFollowUps = Object.values(followUps).some((list) => list.length > 0);
@@ -2200,7 +2341,14 @@ function App() {
           error={pdfError}
           rawError={pdfRawError}
           needsSettings={pdfAnalysisMode === "deep" ? needsDeepPdfSummarySettings : needsPdfSettings}
+          needsQuestionSettings={needsPdfQuestionSettings}
           needsParserSettings={needsDeepPdfParserSettings}
+          textModelChoices={textModelChoices}
+          multimodalModelChoices={multimodalModelChoices}
+          selectedVisualAnalysisModel={selectedPdfVisualAnalysisModel}
+          selectedVisualQuestionModel={selectedPdfVisualQuestionModel}
+          selectedDeepAnalysisModel={selectedPdfDeepAnalysisModel}
+          onFeatureModelChange={updateFeatureModelSelection}
           onPageRangeChange={setPdfPageRange}
           onQuestionChange={setPdfQuestion}
           onQuestionDraftChange={(sectionId, value) =>
@@ -2251,6 +2399,12 @@ function App() {
           )}
 
           <section className="action-row">
+            <ModelSelect
+              label="Text"
+              value={selectedArticleAnalysisModel}
+              choices={textModelChoices}
+              onChange={(value) => updateFeatureModelSelection("articleAnalysis", value)}
+            />
             <button type="button" disabled={analysisState === "running" || needsSettings} onClick={() => void runAnalysis()}>
               {analysisState === "running" ? "Analyzing..." : "Analyze"}
             </button>
@@ -2367,7 +2521,7 @@ function App() {
                         <input
                           type="text"
                           value={questionDrafts[section.id] ?? ""}
-                          disabled={pending || needsSettings}
+                          disabled={pending || needsArticleQuestionSettings}
                           placeholder="Ask about this section..."
                           onChange={(event) =>
                             setQuestionDrafts((drafts) => ({ ...drafts, [section.id]: event.target.value }))
@@ -2388,11 +2542,17 @@ function App() {
                             });
                           }}
                         />
+                        <ModelSelect
+                          label="Text Q&A"
+                          value={selectedArticleQuestionModel}
+                          choices={textModelChoices}
+                          onChange={(value) => updateFeatureModelSelection("articleQuestion", value)}
+                        />
                         <button
                           type="submit"
                           disabled={
                             pending ||
-                            needsSettings ||
+                            needsArticleQuestionSettings ||
                             !(normalizeQuestion(questionDrafts[section.id] ?? "") || (selectionQuote && activeQuestionSectionId === section.id))
                           }
                         >
@@ -2450,7 +2610,14 @@ function PdfReader({
   error,
   rawError,
   needsSettings,
+  needsQuestionSettings,
   needsParserSettings,
+  textModelChoices,
+  multimodalModelChoices,
+  selectedVisualAnalysisModel,
+  selectedVisualQuestionModel,
+  selectedDeepAnalysisModel,
+  onFeatureModelChange,
   onPageRangeChange,
   onQuestionChange,
   onQuestionDraftChange,
@@ -2505,7 +2672,14 @@ function PdfReader({
   error: string;
   rawError: string;
   needsSettings: boolean;
+  needsQuestionSettings: boolean;
   needsParserSettings: boolean;
+  textModelChoices: ConfiguredModelChoice[];
+  multimodalModelChoices: ConfiguredModelChoice[];
+  selectedVisualAnalysisModel: string;
+  selectedVisualQuestionModel: string;
+  selectedDeepAnalysisModel: string;
+  onFeatureModelChange: (featureKey: FeatureModelKey, modelChoiceId: string) => void;
   onPageRangeChange: (value: string) => void;
   onQuestionChange: (value: string) => void;
   onQuestionDraftChange: (sectionId: string, value: string) => void;
@@ -2516,7 +2690,7 @@ function PdfReader({
   onGenerateGuide: () => void;
   onParseDeepPdf: () => void;
   onModeChange: (mode: PdfAnalysisMode) => void;
-  onFocusDeepSection: (section: DeepPdfSection, options?: { scrollToPage?: boolean }) => void;
+  onFocusDeepSection: (section: DeepPdfSection, options?: { scrollToPage?: boolean; targetPage?: number; scrollPanel?: boolean }) => void;
   onToggleDeepBoundingBoxes: () => void;
   onFocusPage: (page: number) => void;
   onAsk: () => void;
@@ -2524,6 +2698,7 @@ function PdfReader({
 }) {
   const canGenerateGuide = !needsSettings && analysisState !== "running";
   const focusedPage = Number(targetPage);
+  const horizontalSwipeRef = useRef({ deltaX: 0, resetTimer: 0, lastSwitchAt: 0 });
   const guideByPage = useMemo(() => new Map((guide?.pages ?? []).map((pageGuide) => [pageGuide.page, pageGuide])), [guide]);
   const analysisByPage = useMemo(() => {
     const map = new Map<number, AnalysisResult["sections"][number]>();
@@ -2568,6 +2743,56 @@ function PdfReader({
       : "Analyze parsed pages";
   const canRunPageRangeAction = pdfAnalysisMode === "deep" ? canRunDeepAction : canGenerateGuide;
   const runPageRangeAction = pdfAnalysisMode === "deep" ? onParseDeepPdf : onGenerateGuide;
+  useEffect(() => {
+    const switchMode = (mode: PdfAnalysisMode) => {
+      if (mode !== pdfAnalysisMode) {
+        onModeChange(mode);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isEditableEventTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        switchMode("visual");
+      } else if (event.key === "ArrowRight") {
+        switchMode("deep");
+      }
+    };
+
+    const handleWheel = (event: WheelEvent) => {
+      if (isEditableEventTarget(event.target) || Math.abs(event.deltaX) <= Math.abs(event.deltaY)) {
+        return;
+      }
+
+      const gesture = horizontalSwipeRef.current;
+      window.clearTimeout(gesture.resetTimer);
+      gesture.deltaX += event.deltaX;
+      gesture.resetTimer = window.setTimeout(() => {
+        gesture.deltaX = 0;
+      }, 180);
+
+      const now = Date.now();
+      if (Math.abs(gesture.deltaX) < 80 || now - gesture.lastSwitchAt < 450) {
+        return;
+      }
+
+      gesture.lastSwitchAt = now;
+      const nextMode = gesture.deltaX > 0 ? "deep" : "visual";
+      gesture.deltaX = 0;
+      switchMode(nextMode);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("wheel", handleWheel, { passive: true });
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("wheel", handleWheel);
+      window.clearTimeout(horizontalSwipeRef.current.resetTimer);
+    };
+  }, [onModeChange, pdfAnalysisMode]);
+
   const pageRangeControl = (
     <div className="pdf-controls">
       <label>
@@ -2595,6 +2820,9 @@ function PdfReader({
     }
 
     const hasQuote = Boolean(selectionQuote && activeQuestionSectionId === sectionId);
+    const hasImageReference = Boolean(hasQuote && selectionImageDataUrl);
+    const usesImageQuestionModel = pdfAnalysisMode === "visual" || hasImageReference;
+    const cardNeedsQuestionSettings = usesImageQuestionModel ? needsQuestionSettings : needsSettings;
     const hasContent = Boolean(normalizeQuestion(questionDrafts[sectionId] ?? "") || hasQuote);
     const quoteReferenceLabels = hasQuote ? getPdfQuoteReferenceLabels(selectionQuote) : [];
 
@@ -2653,7 +2881,7 @@ function PdfReader({
             <input
               type="text"
               value={questionDrafts[sectionId] ?? ""}
-              disabled={pending || needsSettings}
+              disabled={pending || cardNeedsQuestionSettings}
               placeholder={placeholder}
               onChange={(event) => onQuestionDraftChange(sectionId, event.target.value)}
               onFocus={() => onOpenCardQuestion(sectionId)}
@@ -2666,7 +2894,13 @@ function PdfReader({
                 }
               }}
             />
-            <button type="submit" disabled={pending || needsSettings || !hasContent}>
+            <ModelSelect
+              label={usesImageQuestionModel ? "Image Q&A" : "Text Q&A"}
+              value={usesImageQuestionModel ? selectedVisualQuestionModel : selectedDeepAnalysisModel}
+              choices={usesImageQuestionModel ? multimodalModelChoices : textModelChoices}
+              onChange={(value) => onFeatureModelChange(usesImageQuestionModel ? "pdfVisualQuestion" : "pdfDeepAnalysis", value)}
+            />
+            <button type="submit" disabled={pending || cardNeedsQuestionSettings || !hasContent}>
               {pending ? "Asking..." : "Ask"}
             </button>
           </div>
@@ -2716,6 +2950,7 @@ function PdfReader({
             type="button"
             className={pdfAnalysisMode === "visual" ? "active" : ""}
             onClick={() => onModeChange("visual")}
+            title="Left/right arrows or horizontal swipe"
           >
             图片解析
           </button>
@@ -2723,6 +2958,7 @@ function PdfReader({
             type="button"
             className={pdfAnalysisMode === "deep" ? "active" : ""}
             onClick={() => onModeChange("deep")}
+            title="Left/right arrows or horizontal swipe"
           >
             深度解析
           </button>
@@ -2732,6 +2968,12 @@ function PdfReader({
           <>
             <div className="pdf-analysis-row">
               {pageRangeControl}
+              <ModelSelect
+                label="Summary"
+                value={selectedDeepAnalysisModel}
+                choices={textModelChoices}
+                onChange={(value) => onFeatureModelChange("pdfDeepAnalysis", value)}
+              />
               <button className="pdf-guide-button" type="button" disabled={!canRunDeepAction} onClick={onParseDeepPdf}>
                 {deepActionLabel}
               </button>
@@ -2743,6 +2985,12 @@ function PdfReader({
         ) : (
           <div className="pdf-analysis-row">
             {pageRangeControl}
+            <ModelSelect
+              label="Vision"
+              value={selectedVisualAnalysisModel}
+              choices={multimodalModelChoices}
+              onChange={(value) => onFeatureModelChange("pdfVisualAnalysis", value)}
+            />
             <button className="pdf-guide-button" type="button" disabled={!canGenerateGuide} onClick={onGenerateGuide}>
               {analysisState === "running" ? "Analyzing PDF..." : analysis ? "Re-analyze PDF" : "Analyze PDF"}
             </button>
@@ -3036,6 +3284,35 @@ function HistoryView({
 
 function Status({ text }: { text: string }) {
   return <p className="status">{text}</p>;
+}
+
+function ModelSelect({
+  label,
+  value,
+  choices,
+  onChange
+}: {
+  label: string;
+  value: string;
+  choices: ConfiguredModelChoice[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="model-select" title={label}>
+      <span className="model-select-label">{label}</span>
+      <select aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} disabled={choices.length === 0}>
+        {choices.length === 0 ? (
+          <option value="">No model</option>
+        ) : (
+          choices.map((choice) => (
+            <option key={choice.id} value={choice.id}>
+              {choice.label}
+            </option>
+          ))
+        )}
+      </select>
+    </label>
+  );
 }
 
 function EmptyState({
@@ -3670,16 +3947,24 @@ function MathFormula({ formula, display, block = display }: { formula: string; d
   return <span className="math-formula math-formula-inline" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-function scrollPanelToSection(sectionId: string) {
+function scrollPanelToSection(sectionId: string, behavior: ScrollBehavior = "smooth") {
   const target = document.querySelector<HTMLElement>(
     `[data-learn-panel-section-card-id="${CSS.escape(sectionId)}"]`
   );
-  target?.scrollIntoView({ behavior: "smooth", block: "center" });
+  target?.scrollIntoView({ behavior, block: "center" });
 }
 
-function scrollPanelToPdfPage(page: number) {
+function scrollPanelToPdfPage(page: number, behavior: ScrollBehavior = "smooth") {
   const target = document.querySelector<HTMLElement>(`[data-learn-panel-pdf-page="${page}"]`);
-  target?.scrollIntoView({ behavior: "smooth", block: "center" });
+  target?.scrollIntoView({ behavior, block: "center" });
+}
+
+function isEditableEventTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return Boolean(target.closest("input, textarea, select, button, a, [contenteditable='true']"));
 }
 
 function appendAnalysisExportSections(
@@ -3923,6 +4208,57 @@ function getDeepPdfSectionForPage(result: DeepPdfParseResult, page: number): Dee
   );
 }
 
+function getNearestDeepPdfSectionForPage(result: DeepPdfParseResult, page: number): DeepPdfSection | null {
+  let nearest: DeepPdfSection | null = null;
+  let nearestDistance = Infinity;
+
+  for (const section of result.sections) {
+    const distance = getDeepPdfSectionPageDistance(section, page);
+    if (
+      distance < nearestDistance ||
+      (distance === nearestDistance && nearest && section.pageStart < nearest.pageStart)
+    ) {
+      nearest = section;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearest;
+}
+
+function getDeepPdfSectionPageDistance(section: DeepPdfSection, page: number) {
+  if (section.pageStart <= page && section.pageEnd >= page) {
+    return 0;
+  }
+
+  const pages = new Set<number>([section.pageStart, section.pageEnd]);
+  section.blocks.forEach((block) => pages.add(block.page));
+  return Math.min(...[...pages].map((candidate) => Math.abs(candidate - page)));
+}
+
+function getDeepPdfSectionTargetPage(section: DeepPdfSection, requestedPage?: number) {
+  if (
+    requestedPage &&
+    ((section.pageStart <= requestedPage && section.pageEnd >= requestedPage) ||
+      section.blocks.some((block) => block.page === requestedPage))
+  ) {
+    return requestedPage;
+  }
+
+  return section.blocks[0]?.page ?? section.pageStart;
+}
+
+function getNearestRenderedPdfPage(page: number, pageImages: PdfPageImage[], pageCount: number) {
+  if (pageImages.length === 0) {
+    return Math.max(1, Math.min(page, pageCount));
+  }
+
+  return pageImages.reduce(
+    (nearest, image) => (Math.abs(image.page - page) < Math.abs(nearest - page) ? image.page : nearest),
+    pageImages[0].page
+  );
+}
+
 function getDeepPdfPageKey(sourceUrl: string, pageRange = ""): string {
   const suffix = pageRange ? `?range=${encodeURIComponent(pageRange)}` : "";
   return `${sourceUrl}#learn-panel-deep${suffix}`;
@@ -4027,6 +4363,11 @@ function mergePdfSelectionReferences(primary: PdfSelectionReference, fallback: P
 }
 
 function parseHistoryImportText(text: string): unknown {
+  const markdownJsonPayload = text.match(/```(?:json\s+)?learn-panel-history\s*\n([\s\S]*?)\n```/i);
+  if (markdownJsonPayload?.[1]) {
+    return JSON.parse(markdownJsonPayload[1]);
+  }
+
   const embeddedPayload = text.match(/<!--\s*learn-panel-history:v1:([A-Za-z0-9+/=]+)\s*-->/);
   if (embeddedPayload?.[1]) {
     return JSON.parse(decodeBase64Json(embeddedPayload[1]));

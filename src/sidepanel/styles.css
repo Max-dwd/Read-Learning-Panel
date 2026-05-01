@@ -193,7 +193,10 @@ h3 {
 }
 
 .action-row {
-  display: flex;
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) max-content;
 }
 
 .action-row button {
@@ -231,7 +234,7 @@ h3 {
   align-items: end;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-columns: minmax(0, 1fr) minmax(116px, 0.8fr) max-content;
 }
 
 .pdf-analysis-row .pdf-guide-button {
@@ -326,6 +329,43 @@ h3 {
 .pdf-controls input {
   min-height: 36px;
   padding: 0 10px;
+}
+
+.model-select {
+  align-items: center;
+  background: #e6ebf6;
+  border-radius: 6px;
+  color: #1f3f8a;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 700;
+  height: 36px;
+  min-width: 0;
+  padding: 0 26px 0 10px;
+  position: relative;
+  white-space: nowrap;
+}
+
+.model-select::after {
+  content: "▾";
+  font-size: 11px;
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.model-select-label {
+  pointer-events: none;
+}
+
+.model-select select {
+  cursor: pointer;
+  inset: 0;
+  opacity: 0;
+  position: absolute;
+  width: 100%;
 }
 
 .pdf-question-form {
@@ -828,16 +868,16 @@ h3 {
 }
 
 .follow-up-input-row {
-  display: flex;
+  display: grid;
   gap: 6px;
-  align-items: center;
+  align-items: end;
+  grid-template-columns: minmax(0, 1fr) minmax(96px, 0.45fr) auto;
 }
 
 .follow-up-input-row input {
   border: 1px solid #cfd7e6;
   border-radius: 6px;
   color: #1f2937;
-  flex: 1 1 auto;
   font: inherit;
   font-size: 13px;
   height: 36px;
@@ -851,7 +891,6 @@ h3 {
 }
 
 .follow-up-input-row button {
-  flex: 0 0 auto;
   min-width: 52px;
 }
 
