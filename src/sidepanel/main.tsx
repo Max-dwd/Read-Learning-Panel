@@ -3308,7 +3308,7 @@ function findDollarMathToken(text: string, from: number) {
   while (start >= 0) {
     const previous = text[start - 1] ?? "";
     const next = text[start + 1] ?? "";
-    if (next !== "$" && previous !== "\\" && next.trim() && !/[\d,.]/.test(next)) {
+    if (next !== "$" && previous !== "\\" && next.trim()) {
       const close = findClosingDollar(text, start + 1);
       if (close >= 0) {
         return {
