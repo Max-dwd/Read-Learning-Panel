@@ -24,6 +24,7 @@ type DragSelection = {
 type PdfSelectionPayload = {
   text: string;
   imageDataUrl?: string;
+  openQuestion?: boolean;
 };
 
 const PDF_PAGE_SECTION_PREFIX = "pdf-page-";
@@ -132,8 +133,13 @@ function App() {
 
       if (request.type === "LEARN_PANEL_GET_SELECTION") {
         const selectedBlocks = formatSelectedBlockReference(highlightedBlocksRef.current, selectedBlockIdsRef.current);
-        const selection = selectedBlocks || selectionTextRef.current || window.getSelection()?.toString().trim() || "";
-        sendResponse({ ok: true, selection, selectionImageDataUrl: selection ? selectionImageDataUrlRef.current : undefined });
+        const imageDataUrl = selectionImageDataUrlRef.current;
+        const selection =
+          selectedBlocks ||
+          selectionTextRef.current ||
+          window.getSelection()?.toString().trim() ||
+          (imageDataUrl ? "[Selected image region]\nSelected PDF image region." : "");
+        sendResponse({ ok: true, selection, selectionImageDataUrl: imageDataUrl || undefined });
         return false;
       }
 
@@ -455,9 +461,10 @@ function App() {
     selectionTextRef.current = text;
     selectionImageDataUrlRef.current = imageDataUrl ?? "";
     applySelectedBlockIds(new Set());
-    syncPdfSelectionToPanel(highlightedBlocks, highlightedSectionId || `${PDF_PAGE_SECTION_PREFIX}${page}`, {
+    syncPdfSelectionToPanel(highlightedBlocks, `${PDF_PAGE_SECTION_PREFIX}${page}`, {
       text,
-      imageDataUrl: imageDataUrl ?? undefined
+      imageDataUrl: imageDataUrl ?? undefined,
+      openQuestion: Boolean(imageDataUrl)
     });
   }
 
@@ -725,7 +732,8 @@ function syncPdfSelectionToPanel(blocks: DeepPdfBlock[], sectionId: string, sele
       type: "LEARN_VIEWER_PDF_SELECTION_CHANGED",
       sectionId,
       selection: quote,
-      selectionImageDataUrl: selection.imageDataUrl
+      selectionImageDataUrl: selection.imageDataUrl,
+      openQuestion: selection.openQuestion
     })
     .catch(() => undefined);
 }

@@ -26,6 +26,7 @@ import {
   analyzeArticleProgressively,
   analyzeDeepPdfProgressively,
   analyzePdfProgressively,
+  answerDeepPdfVisionQuestion,
   answerPdfQuestion,
   answerSectionQuestion,
   generatePdfGuide,
@@ -234,7 +235,12 @@ function App() {
       }
 
       if (request.type === "LEARN_VIEWER_PDF_SELECTION_CHANGED") {
-        if (activeQuestionSectionIdRef.current === request.sectionId) {
+        if (request.selection && request.openQuestion) {
+          setActiveQuestionSectionId(request.sectionId);
+          setPdfSelectionQuote(request.selection);
+          setPdfSelectionImageDataUrl(request.selectionImageDataUrl ?? "");
+          requestAnimationFrame(() => scrollPanelToSection(request.sectionId));
+        } else if (activeQuestionSectionIdRef.current === request.sectionId) {
           setPdfSelectionQuote(request.selection);
           setPdfSelectionImageDataUrl(request.selectionImageDataUrl ?? "");
         }
@@ -1012,9 +1018,10 @@ function App() {
     }
 
     const liveSelection = await grabPageSelectionReference();
-    const selectedReference: PdfSelectionReference = liveSelection.text
-      ? liveSelection
-      : { text: pdfSelectionQuote, imageDataUrl: pdfSelectionImageDataUrl || undefined };
+    const selectedReference = mergePdfSelectionReferences(liveSelection, {
+      text: pdfSelectionQuote,
+      imageDataUrl: pdfSelectionImageDataUrl || undefined
+    });
     const selectedReferenceText = normalizeQuestion(selectedReference.text);
     const question = normalizeQuestion(selectedReferenceText ? `> ${selectedReferenceText}\n\n${pdfQuestion}` : pdfQuestion);
     if (!question) {
@@ -1045,7 +1052,7 @@ function App() {
         pageImages,
         targetPage,
         question,
-        selectionReference: selectedReferenceText ? selectedReference : undefined,
+        selectionReference: selectedReferenceText || selectedReference.imageDataUrl ? selectedReference : undefined,
         settings: currentSettings
       });
 
@@ -1626,14 +1633,44 @@ function App() {
     try {
       let answer = "";
       if (article.siteName === "PDF Deep") {
-        answer = await answerSectionQuestion({
-          article,
-          section,
-          sectionAnalysis: sectionAnalysis.get(sectionId),
-          priorFollowUps: existingFollowUps,
-          question,
-          settings: currentSettings
-        });
+        const liveSelection = await grabPageSelectionReference();
+        const selectedReference =
+          pdfSelectionQuote && activeQuestionSectionId === sectionId
+            ? mergePdfSelectionReferences(liveSelection, {
+              text: pdfSelectionQuote,
+              imageDataUrl: pdfSelectionImageDataUrl || undefined
+            })
+            : liveSelection.text || liveSelection.imageDataUrl
+              ? liveSelection
+              : undefined;
+
+        if (selectedReference?.imageDataUrl) {
+          const loadedPdf = pdfDocumentRef.current;
+          const page = getPdfPageFromSectionId(sectionId);
+          if (!loadedPdf || !page) {
+            throw new Error("Could not find the PDF page for this screenshot reference.");
+          }
+          const pageImages = await getPdfImagesForPages(loadedPdf, [page]);
+          answer = await answerDeepPdfVisionQuestion({
+            title: loadedPdf.title,
+            url: loadedPdf.sourceUrl,
+            pageImages,
+            targetPage: page,
+            question,
+            selectionReference: selectedReference,
+            sectionText: section.text,
+            settings: currentSettings
+          });
+        } else {
+          answer = await answerSectionQuestion({
+            article,
+            section,
+            sectionAnalysis: sectionAnalysis.get(sectionId),
+            priorFollowUps: existingFollowUps,
+            question,
+            settings: currentSettings
+          });
+        }
       } else {
         const loadedPdf = pdfDocumentRef.current;
         const page = getPdfPageFromSectionId(sectionId);
@@ -1641,16 +1678,23 @@ function App() {
           throw new Error("Could not find the PDF page for this card.");
         }
         const pageImages = await getPdfImagesForPages(loadedPdf, [page]);
+        const liveSelection = await grabPageSelectionReference();
+        const selectedReference =
+          pdfSelectionQuote && activeQuestionSectionId === sectionId
+            ? mergePdfSelectionReferences(liveSelection, {
+              text: pdfSelectionQuote,
+              imageDataUrl: pdfSelectionImageDataUrl || undefined
+            })
+            : liveSelection.text || liveSelection.imageDataUrl
+              ? liveSelection
+              : undefined;
         answer = await answerPdfQuestion({
           title: loadedPdf.title,
           url: loadedPdf.sourceUrl,
           pageImages,
           targetPage: page,
           question,
-          selectionReference:
-            pdfSelectionQuote && activeQuestionSectionId === sectionId
-              ? { text: pdfSelectionQuote, imageDataUrl: pdfSelectionImageDataUrl || undefined }
-              : undefined,
+          selectionReference: selectedReference,
           settings: currentSettings
         });
       }
@@ -2780,9 +2824,9 @@ function FollowUpItem({
         <InlineMarkup text={item.question} />
       </h4>
       {isExpanded && (
-        <p>
-          <InlineMarkup text={item.answer} />
-        </p>
+        <div className="follow-up-answer">
+          <MarkupBlocks text={item.answer} />
+        </div>
       )}
     </div>
   );
@@ -2825,6 +2869,15 @@ function formatDeepPdfPreview(text: string) {
     .slice(0, 320);
 }
 
+function CodeBlock({ code, language }: { code: string; language?: string }) {
+  return (
+    <pre className="markup-code-block">
+      {language && <span className="markup-code-language">{language}</span>}
+      <code>{code}</code>
+    </pre>
+  );
+}
+
 function MarkupBlocks({ text }: { text: string }) {
   const lines = normalizeMarkupText(text).split(/\r?\n/);
   const blocks: React.ReactNode[] = [];
@@ -2836,6 +2889,13 @@ function MarkupBlocks({ text }: { text: string }) {
       continue;
     }
 
+    const codeBlock = readCodeBlock(lines, index);
+    if (codeBlock) {
+      blocks.push(<CodeBlock key={`code-${index}`} code={codeBlock.code} language={codeBlock.language} />);
+      index = codeBlock.nextIndex;
+      continue;
+    }
+
     const mathBlock = readMathBlock(lines, index);
     if (mathBlock) {
       blocks.push(<MathFormula key={`math-${index}`} formula={mathBlock.formula} display />);
@@ -2843,9 +2903,40 @@ function MarkupBlocks({ text }: { text: string }) {
       continue;
     }
 
+    if (isHorizontalRule(lines[index])) {
+      blocks.push(<hr className="markup-divider" key={`divider-${index}`} />);
+      index += 1;
+      continue;
+    }
+
+    const heading = readHeadingLine(lines[index]);
+    if (heading) {
+      blocks.push(
+        <h4 className={`markup-heading level-${heading.level}`} key={`heading-${index}`}>
+          <InlineMarkup text={heading.text} />
+        </h4>
+      );
+      index += 1;
+      continue;
+    }
+
+    if (isBlockquoteLine(lines[index])) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && isBlockquoteLine(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <blockquote className="markup-blockquote" key={`quote-${index}`}>
+          <MarkupBlocks text={quoteLines.join("\n")} />
+        </blockquote>
+      );
+      continue;
+    }
+
     if (isMarkdownTableStart(lines, index)) {
       const tableLines: string[] = [];
-      while (index < lines.length && lines[index].trim().startsWith("|")) {
+      while (index < lines.length && isMarkdownTableBlockLine(lines[index])) {
         tableLines.push(lines[index]);
         index += 1;
       }
@@ -2853,20 +2944,26 @@ function MarkupBlocks({ text }: { text: string }) {
       continue;
     }
 
-    if (isListLine(lines[index])) {
+    const listInfo = readListLine(lines[index]);
+    if (listInfo) {
       const items: string[] = [];
-      while (index < lines.length && isListLine(lines[index])) {
-        items.push(lines[index].replace(/^\s*(?:[-*•]|\d+[.)])\s+/, ""));
+      while (index < lines.length) {
+        const item = readListLine(lines[index]);
+        if (!item || item.ordered !== listInfo.ordered) {
+          break;
+        }
+        items.push(item.text);
         index += 1;
       }
+      const ListTag = listInfo.ordered ? "ol" : "ul";
       blocks.push(
-        <ul className="markup-list" key={`list-${index}`}>
+        <ListTag className="markup-list" key={`list-${index}`}>
           {items.map((item, itemIndex) => (
             <li key={`${item}-${itemIndex}`}>
               <InlineMarkup text={item} />
             </li>
           ))}
-        </ul>
+        </ListTag>
       );
       continue;
     }
@@ -2875,7 +2972,11 @@ function MarkupBlocks({ text }: { text: string }) {
     while (
       index < lines.length &&
       lines[index].trim() &&
-      !isListLine(lines[index]) &&
+      !readListLine(lines[index]) &&
+      !readCodeBlock(lines, index) &&
+      !readHeadingLine(lines[index]) &&
+      !isBlockquoteLine(lines[index]) &&
+      !isHorizontalRule(lines[index]) &&
       !isMathBlockStart(lines[index]) &&
       !isMarkdownTableStart(lines, index)
     ) {
@@ -2890,6 +2991,43 @@ function MarkupBlocks({ text }: { text: string }) {
   }
 
   return <>{blocks}</>;
+}
+
+function readCodeBlock(lines: string[], index: number) {
+  const opening = lines[index].trim().match(/^(```|~~~)\s*([\w.+-]*)\s*$/);
+  if (!opening) {
+    return null;
+  }
+
+  const fence = opening[1];
+  const language = opening[2] || undefined;
+  const codeLines: string[] = [];
+  let currentIndex = index + 1;
+  while (currentIndex < lines.length) {
+    if (lines[currentIndex].trim() === fence) {
+      return { code: codeLines.join("\n"), language, nextIndex: currentIndex + 1 };
+    }
+    codeLines.push(lines[currentIndex]);
+    currentIndex += 1;
+  }
+
+  return { code: codeLines.join("\n"), language, nextIndex: currentIndex };
+}
+
+function readHeadingLine(line: string) {
+  const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+  if (!heading) {
+    return null;
+  }
+  return { level: heading[1].length, text: heading[2] };
+}
+
+function isBlockquoteLine(line: string) {
+  return /^\s*>\s?/.test(line);
+}
+
+function isHorizontalRule(line: string) {
+  return /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line);
 }
 
 function MarkdownTable({ lines }: { lines: string[] }) {
@@ -2932,7 +3070,19 @@ function MarkdownTable({ lines }: { lines: string[] }) {
 }
 
 function isListLine(line: string) {
-  return /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(line);
+  return Boolean(readListLine(line));
+}
+
+function readListLine(line: string) {
+  const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+  if (ordered) {
+    return { ordered: true, text: ordered[1] };
+  }
+  const unordered = line.match(/^\s*[-*•]\s+(.+)$/);
+  if (unordered) {
+    return { ordered: false, text: unordered[1] };
+  }
+  return null;
 }
 
 function normalizeMarkupText(text: string) {
@@ -2952,7 +3102,17 @@ function normalizeMarkupText(text: string) {
 function isMarkdownTableStart(lines: string[], index: number) {
   const current = lines[index]?.trim() ?? "";
   const next = lines[index + 1]?.trim() ?? "";
-  return current.startsWith("|") && current.endsWith("|") && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(next);
+  return isMarkdownTableLine(current) && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(next);
+}
+
+function isMarkdownTableLine(line: string) {
+  const trimmed = line.trim();
+  return trimmed.includes("|") && !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(trimmed);
+}
+
+function isMarkdownTableBlockLine(line: string) {
+  const trimmed = line.trim();
+  return trimmed.includes("|") || /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed);
 }
 
 function parseTableRow(line: string) {
@@ -2967,6 +3127,7 @@ function parseTableRow(line: string) {
 type InlineMarkupToken =
   | { type: "text"; value: string }
   | { type: "strong"; value: string }
+  | { type: "em"; value: string }
   | { type: "code"; value: string }
   | { type: "math"; value: string; display: boolean };
 
@@ -3028,6 +3189,13 @@ function InlineMarkup({ text }: { text: string }) {
             </strong>
           );
         }
+        if (part.type === "em") {
+          return (
+            <em key={`${part.value}-${index}`}>
+              <InlineMarkup text={part.value} />
+            </em>
+          );
+        }
         if (part.type === "code") {
           return <code key={`${part.value}-${index}`}>{part.value}</code>;
         }
@@ -3065,6 +3233,7 @@ function findNextInlineMarkup(text: string, from: number): InlineMarkupMatch | n
   const candidates = [
     findDelimitedToken(text, from, "`", "`", "code"),
     findDelimitedToken(text, from, "**", "**", "strong"),
+    findEmphasisToken(text, from),
     findDelimitedToken(text, from, "\\(", "\\)", "math", false),
     findDelimitedToken(text, from, "\\\\(", "\\\\)", "math", false),
     findDelimitedToken(text, from, "\\[", "\\]", "math", true),
@@ -3103,6 +3272,35 @@ function findDelimitedToken(
       ...(type === "math" ? { display } : {})
     } as InlineMarkupToken
   } satisfies InlineMarkupMatch;
+}
+
+function findEmphasisToken(text: string, from: number) {
+  let start = text.indexOf("*", from);
+  while (start >= 0) {
+    const previous = text[start - 1] ?? "";
+    const next = text[start + 1] ?? "";
+    if (previous !== "*" && next !== "*" && next.trim()) {
+      let close = text.indexOf("*", start + 1);
+      while (close >= 0) {
+        const beforeClose = text[close - 1] ?? "";
+        const afterClose = text[close + 1] ?? "";
+        if (beforeClose.trim() && beforeClose !== "*" && afterClose !== "*") {
+          return {
+            start,
+            end: close + 1,
+            token: {
+              type: "em",
+              value: text.slice(start + 1, close)
+            } as InlineMarkupToken
+          } satisfies InlineMarkupMatch;
+        }
+        close = text.indexOf("*", close + 1);
+      }
+    }
+    start = text.indexOf("*", start + 1);
+  }
+
+  return null;
 }
 
 function findDollarMathToken(text: string, from: number) {
@@ -3317,6 +3515,13 @@ async function sendToTab(tabId: number, request: ContentRequest): Promise<Conten
 
 async function sendToViewer(request: ContentRequest): Promise<ContentResponse> {
   return chrome.runtime.sendMessage(request);
+}
+
+function mergePdfSelectionReferences(primary: PdfSelectionReference, fallback: PdfSelectionReference): PdfSelectionReference {
+  return {
+    text: primary.text || fallback.text,
+    imageDataUrl: primary.imageDataUrl || fallback.imageDataUrl
+  };
 }
 
 function parseHistoryImportText(text: string): unknown {

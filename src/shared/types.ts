@@ -145,7 +145,13 @@ export type ContentRequest =
     }
   | { type: "LEARN_PANEL_REMOVE_PDF_SELECTION_REFERENCE"; referenceLabel: string }
   | { type: "LEARN_VIEWER_FOCUS_PDF_SECTION"; sectionId: string }
-  | { type: "LEARN_VIEWER_PDF_SELECTION_CHANGED"; sectionId: string; selection: string; selectionImageDataUrl?: string }
+  | {
+      type: "LEARN_VIEWER_PDF_SELECTION_CHANGED";
+      sectionId: string;
+      selection: string;
+      selectionImageDataUrl?: string;
+      openQuestion?: boolean;
+    }
   | { type: "LEARN_VIEWER_USE_PDF_SELECTION"; sectionId: string; selection: string; selectionImageDataUrl?: string };
 
 export type ContentResponse =

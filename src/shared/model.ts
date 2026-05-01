@@ -15,6 +15,8 @@ import type { PdfPageImage } from "./pdf";
 const MAX_TOTAL_CHARS = 42000;
 const MAX_SECTION_CHARS = 3600;
 const MAX_FOLLOW_UP_SECTION_CHARS = 9000;
+const FOLLOW_UP_MARKDOWN_FORMAT_INSTRUCTION =
+  "Format the answer as standard Markdown when structure helps: use headings, bullet/numbered lists, blockquotes, fenced code, math, and GitHub-style tables with blank lines around block elements. Do not use HTML.";
 const INTERPRETATION_GUIDANCE =
   "For each section.interpretation, write a 'What this means' explanation that is long enough for learning. Use a real markdown bullet list by default: each item must start on its own line with '- '. Inside JSON/NDJSON strings, encode those line breaks as \\n. Keep it to 2-4 bullets， more is okay if the section contains substantial content. Use a compact markdown table only when comparison is clearer. Do not put bullets inline in one sentence. Avoid dense paragraphs, abstract wording, and long caveats. Put the most important takeaway in **bold**.";
 
@@ -29,6 +31,15 @@ type OpenAIResponse = {
   error?: {
     message?: string;
   };
+};
+
+type VisionClientConfig = {
+  apiKey: string;
+  endpoint: string;
+  model: string;
+  missingApiKeyMessage: string;
+  missingEndpointMessage: string;
+  missingModelMessage: string;
 };
 
 type OpenAIStreamChunk = {
@@ -525,6 +536,43 @@ export async function answerPdfQuestion({
   });
 }
 
+export async function answerDeepPdfVisionQuestion({
+  title,
+  url,
+  pageImages,
+  targetPage,
+  question,
+  selectionReference,
+  sectionText,
+  settings
+}: {
+  title: string;
+  url: string;
+  pageImages: PdfPageImage[];
+  targetPage: number | null;
+  question: string;
+  selectionReference?: PdfSelectionReference;
+  sectionText?: string;
+  settings: Settings;
+}): Promise<string> {
+  return requestPdfVision({
+    pageImages,
+    supplementalImageDataUrls: selectionReference?.imageDataUrl ? [selectionReference.imageDataUrl] : [],
+    prompt: buildPdfQuestionPrompt({
+      title,
+      url,
+      pages: pageImages.map((image) => image.page),
+      targetPage,
+      question,
+      selectionReference,
+      supportingContext: sectionText ? `Datalab parsed text for the target page:\n${truncate(sectionText, MAX_FOLLOW_UP_SECTION_CHARS)}` : "",
+      outputLanguage: settings.outputLanguage
+    }),
+    settings,
+    maxTokens: 1800
+  });
+}
+
 export async function generatePdfGuide({
   title,
   url,
@@ -555,26 +603,28 @@ async function requestPdfVision({
   supplementalImageDataUrls = [],
   prompt,
   settings,
+  client = getPdfVisionClientConfig(settings),
   maxTokens
 }: {
   pageImages: PdfPageImage[];
   supplementalImageDataUrls?: string[];
   prompt: string;
   settings: Settings;
+  client?: VisionClientConfig;
   maxTokens: number;
 }): Promise<string> {
-  const apiKey = getActivePdfApiKey(settings);
+  const apiKey = client.apiKey;
   if (!apiKey) {
-    throw new Error("Missing PDF API key. Open the extension settings and add your PDF API key.");
+    throw new Error(client.missingApiKeyMessage);
   }
 
-  const pdfEndpoint = settings.pdfEndpoint.trim();
-  const pdfModel = settings.pdfModel.trim();
+  const pdfEndpoint = client.endpoint.trim();
+  const pdfModel = client.model.trim();
   if (!pdfEndpoint) {
-    throw new Error("Missing PDF endpoint. Open the extension settings and add your PDF endpoint.");
+    throw new Error(client.missingEndpointMessage);
   }
   if (!pdfModel) {
-    throw new Error("Missing PDF parsing model. Open the extension settings and add a PDF parsing model.");
+    throw new Error(client.missingModelMessage);
   }
 
   const response = await fetch(pdfEndpoint, {
@@ -632,6 +682,17 @@ async function requestPdfVision({
   return stripCodeFence(answer);
 }
 
+function getPdfVisionClientConfig(settings: Settings): VisionClientConfig {
+  return {
+    apiKey: getActivePdfApiKey(settings),
+    endpoint: settings.pdfEndpoint,
+    model: settings.pdfModel,
+    missingApiKeyMessage: "Missing PDF API key. Open the extension settings and add your PDF API key.",
+    missingEndpointMessage: "Missing PDF endpoint. Open the extension settings and add your PDF endpoint.",
+    missingModelMessage: "Missing PDF parsing model. Open the extension settings and add a PDF parsing model."
+  };
+}
+
 function buildPdfGuidePrompt({
   title,
   url,
@@ -674,6 +735,7 @@ function buildPdfQuestionPrompt({
   targetPage,
   question,
   selectionReference,
+  supportingContext,
   outputLanguage
 }: {
   title: string;
@@ -682,6 +744,7 @@ function buildPdfQuestionPrompt({
   targetPage: number | null;
   question: string;
   selectionReference?: PdfSelectionReference;
+  supportingContext?: string;
   outputLanguage: OutputLanguage;
 }): string {
   const languageInstruction =
@@ -698,11 +761,13 @@ function buildPdfQuestionPrompt({
     languageInstruction,
     `PDF title: ${title}`,
     `PDF URL: ${url}`,
+    FOLLOW_UP_MARKDOWN_FORMAT_INSTRUCTION,
     `下面是 PDF 的第 ${pages.join(", ")} 页截图。请先基于截图内容理解页面，再回答用户问题；如果是多页，请按页组织要点。`,
     selectionReference?.imageDataUrl
       ? "用户引用了一个框选区域；完整页截图之后还附带了该框选区域的小截图。回答时优先参考这个小截图，再结合整页上下文。"
       : "",
     selectionReference?.text ? `引用内容：\n${selectionReference.text}` : "",
+    supportingContext ? `辅助文本上下文：\n${supportingContext}` : "",
     focusText,
     `用户问题：${question}`
   ].filter(Boolean).join("\n\n");
@@ -955,6 +1020,7 @@ function buildSectionQuestionPrompt({
   return [
     languageInstruction,
     "The user is asking a follow-up question about a single section. Answer using the section text and cached analysis. Do not re-summarize the whole article unless needed.",
+    FOLLOW_UP_MARKDOWN_FORMAT_INSTRUCTION,
     "",
     `Article title: ${article.title}`,
     `Article URL: ${article.url}`,
