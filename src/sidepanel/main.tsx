@@ -157,7 +157,8 @@ function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("reader");
   const [documentMode, setDocumentMode] = useState<DocumentMode>("article");
   const [pdfDocument, setPdfDocument] = useState<LoadedPdfDocument | null>(null);
-  const [pdfPageRange, setPdfPageRange] = useState("all");
+  const [pdfVisualPageRange, setPdfVisualPageRange] = useState("all");
+  const [pdfDeepPageRange, setPdfDeepPageRange] = useState("all");
   const [pdfTargetPage, setPdfTargetPage] = useState("1");
   const [pdfQuestion, setPdfQuestion] = useState("");
   const [pdfSelectionQuote, setPdfSelectionQuote] = useState("");
@@ -192,6 +193,7 @@ function App() {
   const [followedSectionId, setFollowedSectionId] = useState<string | null>(null);
   const [followedPdfPage, setFollowedPdfPage] = useState<number | null>(null);
   const [historyImportNotice, setHistoryImportNotice] = useState<{ type: "info" | "error"; text: string } | null>(null);
+  const pdfPageRange = pdfAnalysisMode === "deep" ? pdfDeepPageRange : pdfVisualPageRange;
   const cacheRef = useRef(new Map<string, PageCacheEntry>());
   const historyImportInputRef = useRef<HTMLInputElement | null>(null);
   const pdfDocumentRef = useRef<LoadedPdfDocument | null>(null);
@@ -552,6 +554,8 @@ function App() {
       setPdfPreviewState("idle");
       setPdfPreviewError("");
       setPdfAnalysisMode("visual");
+      setPdfVisualPageRange("all");
+      setPdfDeepPageRange("all");
       setDeepPdfParse(null);
       setDeepPdfParseState("idle");
       setDeepPdfParseStatus("");
@@ -661,6 +665,8 @@ function App() {
     setPdfPreviewState("idle");
     setPdfPreviewError("");
     setPdfAnalysisMode("visual");
+    setPdfVisualPageRange("all");
+    setPdfDeepPageRange("all");
     setDeepPdfParse(null);
     setDeepPdfParseState("idle");
     setDeepPdfParseStatus("");
@@ -694,7 +700,8 @@ function App() {
     pdfDocumentRef.current = loadedPdf;
     setPdfDocument(loadedPdf);
     const requestedDeepRange = getDeepPdfRangeFromViewerUrl(tabUrl);
-    setPdfPageRange(requestedDeepRange ? fromDatalabPageRangeLabel(requestedDeepRange) : "all");
+    setPdfVisualPageRange("all");
+    setPdfDeepPageRange(requestedDeepRange ? fromDatalabPageRangeLabel(requestedDeepRange) : "all");
     setPdfTargetPage(String(targetPage));
     setPdfQuestion("");
     setPdfAnswers([]);
@@ -719,7 +726,7 @@ function App() {
       void saveDeepPdfParse(historyDeepParse.sourceUrl, historyDeepParse.pageRange, historyDeepParse);
     }
     if (savedDeepParse && requestedDeepRange === null) {
-      setPdfPageRange(savedDeepParse.pageRange ? fromDatalabPageRangeLabel(savedDeepParse.pageRange) : "all");
+      setPdfDeepPageRange(savedDeepParse.pageRange ? fromDatalabPageRangeLabel(savedDeepParse.pageRange) : "all");
     }
     const savedDeepPdfBoundingBoxesVisible = savedDeepParse
       ? await loadSavedDeepPdfBoundingBoxesVisible(savedDeepParse.sourceUrl, savedDeepParse.pageRange)
@@ -1465,7 +1472,7 @@ function App() {
 
     let currentDatalabPageRange = "";
     try {
-      currentDatalabPageRange = toDatalabPageRange(parsePdfPageRange(pdfPageRange, loadedPdf.pageCount), loadedPdf.pageCount);
+      currentDatalabPageRange = toDatalabPageRange(parsePdfPageRange(pdfDeepPageRange, loadedPdf.pageCount), loadedPdf.pageCount);
     } catch {
       currentDatalabPageRange = deepPdfParse?.pageRange ?? "";
     }
@@ -1485,7 +1492,7 @@ function App() {
     options: { clearOnMiss?: boolean; focusPage?: number } = {}
   ) {
     try {
-      const pages = parsePdfPageRange(pdfPageRange, loadedPdf.pageCount);
+      const pages = parsePdfPageRange(pdfDeepPageRange, loadedPdf.pageCount);
       const datalabPageRange = toDatalabPageRange(pages, loadedPdf.pageCount);
       const saved = await loadSavedDeepPdfParse(loadedPdf.sourceUrl, datalabPageRange);
       if (saved) {
@@ -2349,7 +2356,13 @@ function App() {
           selectedVisualQuestionModel={selectedPdfVisualQuestionModel}
           selectedDeepAnalysisModel={selectedPdfDeepAnalysisModel}
           onFeatureModelChange={updateFeatureModelSelection}
-          onPageRangeChange={setPdfPageRange}
+          onPageRangeChange={(value) => {
+            if (pdfAnalysisMode === "deep") {
+              setPdfDeepPageRange(value);
+            } else {
+              setPdfVisualPageRange(value);
+            }
+          }}
           onQuestionChange={setPdfQuestion}
           onQuestionDraftChange={(sectionId, value) =>
             setQuestionDrafts((drafts) => ({ ...drafts, [sectionId]: value }))
@@ -2368,7 +2381,7 @@ function App() {
           onToggleDeepBoundingBoxes={toggleDeepPdfBoundingBoxes}
           onFocusPage={(page) => {
             setPdfTargetPage(String(page));
-            setPdfPageRange("all");
+            setPdfVisualPageRange("all");
             void sendToViewer({ type: "LEARN_PANEL_SCROLL_TO_PDF_PAGE", page });
           }}
           onAsk={() => void askPdf()}
