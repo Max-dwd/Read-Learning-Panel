@@ -55,6 +55,7 @@ export type ExtractedArticle = {
 
 export type AnalysisSection = {
   id: string;
+  title?: string;
   summary: string;
   interpretation: string;
   role_in_article: string;
@@ -70,6 +71,7 @@ export type AnalysisResult = {
 
 export type PdfPageGuide = {
   page: number;
+  title?: string;
   summary: string;
   explanation: string;
   goal: string;
@@ -136,12 +138,14 @@ export type ContentRequest =
   | { type: "LEARN_PANEL_GET_SELECTION" }
   | { type: "LEARN_PANEL_GET_ACTIVE_SECTION" }
   | { type: "LEARN_PANEL_GET_ACTIVE_PDF_PAGE" }
+  | { type: "LEARN_PANEL_GET_ACTIVE_DEEP_PDF_SECTION" }
   | { type: "LEARN_PANEL_SCROLL_TO_PDF_PAGE"; page: number }
   | {
       type: "LEARN_PANEL_HIGHLIGHT_PDF_BLOCKS";
       sectionId: string;
       blocks: DeepPdfBlock[];
       pageBboxes?: Record<number, PdfBoundingBox>;
+      targetPage?: number;
     }
   | { type: "LEARN_PANEL_REMOVE_PDF_SELECTION_REFERENCE"; referenceLabel: string }
   | { type: "LEARN_VIEWER_FOCUS_PDF_SECTION"; sectionId: string }
@@ -159,6 +163,7 @@ export type ContentResponse =
   | { ok: true }
   | { ok: true; selection: string; selectionImageDataUrl?: string }
   | { ok: true; activeSectionId: string | null }
+  | { ok: true; activeDeepPdfSectionId: string | null }
   | { ok: true; activePage: number }
   | { ok: false; error: string };
 

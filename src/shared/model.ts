@@ -718,8 +718,9 @@ function buildPdfGuidePrompt({
     `下面是 PDF 的第 ${pages.join(", ")} 页截图。PDF 的 section 单位就是页。`,
     "不要输出整份 PDF 的总导读。必须为每一页都生成一个独立结果。",
     "Return only valid JSON. Do not wrap it in markdown. Use exactly this shape:",
-    `{"pages":[{"page":1,"summary":"string","explanation":"string","goal":"string"}]}`,
+    `{"pages":[{"page":1,"title":"short precise page title","summary":"string","explanation":"string","goal":"string"}]}`,
     `The pages array must contain exactly these page numbers, in order: ${pages.join(", ")}.`,
+    "For each page.title, write a concise keyword-style title that precisely captures that page's content. Do not include the page number. Keep it under 8 words or 14 Chinese characters. Avoid duplicate titles across pages; if two pages share the same core topic, add a specific suffix after ' - ' such as 'Method - Assumptions' or '结果 - 消融'.",
     "Do not start any summary, explanation, or goal with a page label such as 'Page 1:' or '第 1 页：'; the UI already shows the page number.",
     "For each page.summary, summarize only what this page says. Put the main point in **bold**.",
     "For each page.explanation, explain what this page means in concrete quick-scan bullets. Use real markdown bullets with '\\n- ' line breaks inside the JSON string. Put the key idea in **bold**.",
@@ -873,11 +874,11 @@ function buildProgressivePrompt(article: ExtractedArticle, outputLanguage: Outpu
     outputLanguage === "follow-page"
       ? [
         `Use the same language as the article when possible. Detected page language: ${article.language || "unknown"}.`,
-        "Every user-facing JSON string value must use that page language. Keep JSON keys type, id, summary, why_read, interpretation, and role_in_article exactly as written."
+        "Every user-facing JSON string value must use that page language. Keep JSON keys type, id, title, summary, why_read, interpretation, and role_in_article exactly as written."
       ].join(" ")
       : outputLanguage === "zh"
-        ? "Write every user-facing JSON string value in Chinese. Keep JSON keys type, id, summary, why_read, interpretation, and role_in_article exactly as written."
-        : "Write every user-facing JSON string value in English. Keep JSON keys type, id, summary, why_read, interpretation, and role_in_article exactly as written.";
+        ? "Write every user-facing JSON string value in Chinese. Keep JSON keys type, id, title, summary, why_read, interpretation, and role_in_article exactly as written."
+        : "Write every user-facing JSON string value in English. Keep JSON keys type, id, title, summary, why_read, interpretation, and role_in_article exactly as written.";
 
   return [
     languageInstruction,
@@ -886,7 +887,8 @@ function buildProgressivePrompt(article: ExtractedArticle, outputLanguage: Outpu
     "First output exactly one overall line:",
     `{"type":"overall","summary":"string","why_read":"string"}`,
     "Then output one section line per input section, in the same order as the input:",
-    `{"type":"section","id":"same section id from input","summary":"string","interpretation":"string","role_in_article":"string"}`,
+    `{"type":"section","id":"same section id from input","title":"short title","summary":"string","interpretation":"string","role_in_article":"string"}`,
+    "For each section.title, write a concise content title. For normal article sections, keep or lightly tighten the input section title. For PDF page sections, write a keyword-style page title without the page number.",
     "Use **bold** in every user-facing analysis field to mark the key term, claim, contrast, problem, or contribution.",
     "For overall.why_read, answer the high-level learning goal: why this is worth reading, and what worldview, values, mental model, or life perspective it may offer.",
     "For each section.summary, summarize only what this section says, with the main point in **bold**.",
@@ -906,6 +908,7 @@ function buildPdfProgressivePrompt(article: ExtractedArticle, pages: number[], o
     "PDF-specific input rules:",
     `The attached images are PDF pages ${pages.join(", ")} in the same order as the input sections.`,
     "Treat each PDF page as one article section. Use the page screenshot as the source of truth for that section.",
+    "For each section.title, write a precise keyword-style title for that page. Do not include page numbers or labels such as 'Page 1'. Keep it under 8 words or 14 Chinese characters. Avoid duplicate titles across pages; if the same keyword repeats, expand it with a specific suffix after ' - ', for example 'Pipeline - Evaluation' or '实验 - 数据集'.",
     "For section.role_in_article, explain how this page changes or advances the PDF by referencing all pages when useful.",
     "If a page is mostly cover, references, agenda, or blank space, still analyze its actual role instead of skipping it."
   ].join("\n");
@@ -920,6 +923,7 @@ function buildDeepPdfProgressivePrompt(article: ExtractedArticle, outputLanguage
     "This PDF was parsed into structured blocks by Datalab Marker. Each input section is exactly one PDF page, not one heading or subsection.",
     "Section text contains that page's blocks in reading order. Blocks may be headings, paragraphs, lists, tables, figures, equations, or captions.",
     "Analyze the page as the main unit. Do not treat H3/H4-like blocks as separate document sections.",
+    "For each section.title, write a precise keyword-style title for that page. Do not include page numbers or labels such as 'Page 1'. Keep it under 8 words or 14 Chinese characters. Avoid duplicate titles across parsed pages; if the same keyword repeats, expand it with a specific suffix after ' - ', for example 'Pipeline - Evaluation' or '实验 - 数据集'.",
     "Do not start section.summary, section.interpretation, or section.role_in_article with a page label such as 'Page 1:' or '第 1 页：'; the UI already shows the page number.",
     "For section.summary, summarize what this page says as a whole.",
     "For section.interpretation, explain the relationships among blocks on the same page: how definitions, claims, evidence, tables, figures, equations, and captions support or contrast each other.",
@@ -1174,6 +1178,7 @@ function parseProgressLine(line: string, knownIds: Set<string>): AnalysisProgres
   const candidate = parsed as {
     type?: string;
     id?: string;
+    title?: string;
     summary?: string;
     why_read?: string;
     interpretation?: string;
@@ -1202,6 +1207,7 @@ function parseProgressLine(line: string, knownIds: Set<string>): AnalysisProgres
       type: "section",
       section: {
         id: candidate.id,
+        ...(typeof candidate.title === "string" ? { title: candidate.title } : {}),
         summary: candidate.summary,
         interpretation: candidate.interpretation,
         role_in_article: candidate.role_in_article

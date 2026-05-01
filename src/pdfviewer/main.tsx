@@ -53,6 +53,7 @@ function App() {
   const renderingRef = useRef(0);
   const pageCountRef = useRef(0);
   const highlightedBlocksRef = useRef<DeepPdfBlock[]>([]);
+  const highlightedSectionIdRef = useRef("");
   const selectedBlockIdsRef = useRef<Set<string>>(new Set());
   const selectionTextRef = useRef("");
   const selectionImageDataUrlRef = useRef("");
@@ -116,6 +117,10 @@ function App() {
   }, [highlightedBlocks]);
 
   useEffect(() => {
+    highlightedSectionIdRef.current = highlightedSectionId;
+  }, [highlightedSectionId]);
+
+  useEffect(() => {
     selectedBlockIdsRef.current = selectedBlockIds;
   }, [selectedBlockIds]);
 
@@ -128,6 +133,11 @@ function App() {
     ) => {
       if (request.type === "LEARN_PANEL_GET_ACTIVE_PDF_PAGE") {
         sendResponse({ ok: true, activePage: getVisiblePageRef.current() });
+        return false;
+      }
+
+      if (request.type === "LEARN_PANEL_GET_ACTIVE_DEEP_PDF_SECTION") {
+        sendResponse({ ok: true, activeDeepPdfSectionId: getVisibleDeepPdfSection() });
         return false;
       }
 
@@ -174,9 +184,9 @@ function App() {
           }
           return next;
         });
-        const firstPage = request.blocks.find((block) => block.bbox)?.page;
-        if (firstPage) {
-          scrollToPageRef.current(firstPage);
+        const targetPage = request.targetPage ?? request.blocks.find((block) => block.bbox)?.page;
+        if (targetPage) {
+          scrollToPageRef.current(targetPage);
         }
         sendResponse({ ok: true });
         return false;
@@ -246,6 +256,37 @@ function App() {
     }
 
     return best;
+  }
+
+  function getVisibleDeepPdfSection(): string | null {
+    const scrollEl = scrollRef.current;
+    if (!scrollEl) {
+      return highlightedSectionIdRef.current || null;
+    }
+
+    const containerRect = scrollEl.getBoundingClientRect();
+    const anchorY = containerRect.top + scrollEl.clientHeight * 0.4;
+    let bestSectionId = "";
+    let bestDistance = Infinity;
+
+    scrollEl.querySelectorAll<HTMLElement>(".pdf-block-highlight[data-target-section-id]").forEach((element) => {
+      const sectionId = element.dataset.targetSectionId;
+      if (!sectionId) {
+        return;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const distance =
+        rect.top <= anchorY && rect.bottom >= anchorY
+          ? 0
+          : Math.min(Math.abs(rect.top - anchorY), Math.abs(rect.bottom - anchorY));
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestSectionId = sectionId;
+      }
+    });
+
+    return bestSectionId || highlightedSectionIdRef.current || null;
   }
 
   async function renderAllPages(pdf: PDFDocumentProxy, version: number) {
@@ -641,6 +682,7 @@ function PdfBlockOverlay({
             aria-label={`Focus parsed ${blockType} block`}
             className={`pdf-block-highlight pdf-block-highlight--${getBlockTypeTone(block.type)}${selected ? " selected" : ""}`}
             data-block-type={blockType}
+            data-target-section-id={targetSectionId}
             key={`${targetSectionId}-${block.id}`}
             onClick={(event) => onBlockClick(block, targetSectionId, event)}
             onContextMenu={(event) => onBlockContextMenu(block, targetSectionId, event)}

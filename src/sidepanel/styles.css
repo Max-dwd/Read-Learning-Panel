@@ -227,6 +227,18 @@ h3 {
   margin-bottom: 12px;
 }
 
+.pdf-analysis-row {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) max-content;
+}
+
+.pdf-analysis-row .pdf-guide-button {
+  min-width: 128px;
+  white-space: nowrap;
+}
+
 .pdf-mode-switch {
   background: #eef2f7;
   border-radius: 7px;
@@ -248,12 +260,6 @@ h3 {
   background: #fff;
   box-shadow: 0 1px 2px rgba(30, 42, 62, 0.1);
   color: #1f3f8a;
-}
-
-.pdf-deep-actions {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 12px;
 }
 
 .pdf-deep-status,
@@ -278,21 +284,21 @@ h3 {
   box-shadow: 0 0 0 2px rgba(36, 88, 211, 0.12);
 }
 
-.pdf-deep-section-card h3 {
+.pdf-deep-section-card > h3 {
   font-size: 14px;
   line-height: 1.35;
-  margin: 10px 12px 6px;
+  margin: 8px 10px 4px;
 }
 
 .pdf-deep-section-card .preview {
   margin: 0;
-  padding: 0 14px 14px;
+  padding: 0 10px 10px;
 }
 
 .pdf-controls {
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) 104px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .pdf-controls label,
@@ -333,6 +339,11 @@ h3 {
 }
 
 .pdf-question-form button {
+  width: 100%;
+}
+
+.pdf-panel > .secondary-button {
+  margin-top: 8px;
   width: 100%;
 }
 
