@@ -194,12 +194,17 @@ h3 {
 
 .action-row {
   align-items: end;
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  grid-template-columns: minmax(0, 1fr) max-content;
+}
+
+.action-row .model-select {
+  flex: 1 1 84px;
 }
 
 .action-row button {
+  flex: 1 0 116px;
   width: 100%;
 }
 
@@ -232,12 +237,21 @@ h3 {
 
 .pdf-analysis-row {
   align-items: end;
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) minmax(116px, 0.8fr) max-content;
+}
+
+.pdf-analysis-row .pdf-controls {
+  flex: 1 1 145px;
+}
+
+.pdf-analysis-row .model-select {
+  flex: 1 1 92px;
 }
 
 .pdf-analysis-row .pdf-guide-button {
+  flex: 1 0 128px;
   min-width: 128px;
   white-space: nowrap;
 }
@@ -358,6 +372,11 @@ h3 {
 
 .model-select-label {
   pointer-events: none;
+}
+
+.detail-select {
+  background: #f1efe7;
+  color: #604410;
 }
 
 .model-select select {
@@ -789,7 +808,7 @@ h3 {
   gap: 8px;
 }
 
-.section-card-header span {
+.section-card-header .section-level-badge {
   background: #eef3ff;
   border-radius: 5px;
   color: #2458d3;
@@ -798,6 +817,42 @@ h3 {
   font-weight: 750;
   line-height: 20px;
   padding: 0 6px;
+}
+
+.section-card-header .section-visual-indicator {
+  background: #eefaf3;
+  border: 1px solid #b8dec9;
+  border-radius: 5px;
+  color: #237447;
+  flex: 0 0 auto;
+  height: 20px;
+  line-height: 20px;
+  padding: 0;
+  position: relative;
+  width: 20px;
+}
+
+.section-card-header .section-visual-indicator::before {
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
+  content: "";
+  height: 10px;
+  left: 4px;
+  position: absolute;
+  top: 4px;
+  width: 12px;
+}
+
+.section-card-header .section-visual-indicator::after {
+  border-bottom: 1.5px solid currentColor;
+  border-left: 1.5px solid currentColor;
+  content: "";
+  height: 5px;
+  left: 6px;
+  position: absolute;
+  top: 8px;
+  transform: skewX(-24deg);
+  width: 8px;
 }
 
 .section-card-header h3 {

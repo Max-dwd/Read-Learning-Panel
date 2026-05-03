@@ -189,7 +189,8 @@ function trimArticleForStorage(article: ExtractedArticle): ExtractedArticle {
     excerpt: article.excerpt.slice(0, 1800),
     sections: article.sections.map((section) => ({
       ...section,
-      text: section.text.slice(0, MAX_SECTION_TEXT_CHARS)
+      text: section.text.slice(0, MAX_SECTION_TEXT_CHARS),
+      visuals: section.visuals?.slice(0, 3).map(({ imageDataUrl: _imageDataUrl, ...visual }) => visual)
     }))
   };
 }
@@ -324,6 +325,9 @@ function appendSectionAnalysisMarkdown(lines: string[], section: AnalysisResult[
   }
   lines.push(`**Summary:** ${section.summary}`);
   lines.push(`**Interpretation:** ${section.interpretation}`);
+  if (section.visual_description) {
+    lines.push(`**Image understanding:** ${section.visual_description}`);
+  }
   lines.push(`**Role:** ${section.role_in_article}`);
 }
 

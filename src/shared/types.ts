@@ -1,6 +1,7 @@
 export type OutputLanguage = "follow-page" | "zh" | "en";
 export type PdfAnalysisMode = "visual" | "deep";
 export type DatalabParseMode = "fast" | "balanced" | "accurate";
+export type AnalysisDetailLevel = "handout" | "study" | "textbook";
 
 export const DEEP_PDF_GEOMETRY_VERSION = 4;
 
@@ -21,6 +22,7 @@ export type ModelConfig = {
 export type FeatureModelKey =
   | "articleAnalysis"
   | "articleQuestion"
+  | "articleVisualRewrite"
   | "pdfVisualAnalysis"
   | "pdfVisualQuestion"
   | "pdfDeepAnalysis";
@@ -49,11 +51,21 @@ export type Settings = {
   outputLanguage: OutputLanguage;
 };
 
+export type ExtractedSectionVisual = {
+  id: string;
+  kind: "image" | "gif" | "component_screenshot";
+  src?: string;
+  imageDataUrl?: string;
+  alt?: string;
+  caption?: string;
+};
+
 export type ExtractedSection = {
   id: string;
   title: string;
   level: 2 | 3;
   text: string;
+  visuals?: ExtractedSectionVisual[];
 };
 
 export type ExtractedArticle = {
@@ -72,6 +84,7 @@ export type AnalysisSection = {
   summary: string;
   interpretation: string;
   role_in_article: string;
+  visual_description?: string;
 };
 
 export type AnalysisResult = {

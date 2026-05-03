@@ -32,6 +32,7 @@ import {
   answerPdfQuestion,
   answerSectionQuestion,
   generatePdfGuide,
+  rewriteArticleSectionWithVisuals,
   type AnalysisProgressEvent
 } from "../shared/model";
 import { parsePdfWithDatalab } from "../shared/datalab";
@@ -62,6 +63,7 @@ import {
 } from "../shared/settings";
 import type {
   AnalysisResult,
+  AnalysisDetailLevel,
   ContentRequest,
   ContentResponse,
   DeepPdfBlock,
@@ -79,6 +81,11 @@ import "katex/dist/katex.min.css";
 import "./styles.css";
 
 const PDF_GUIDE_STORAGE_PREFIX = "learnPanelPdfGuide_";
+const ANALYSIS_DETAIL_OPTIONS: Array<{ value: AnalysisDetailLevel; label: string; title: string }> = [
+  { value: "handout", label: "Handout", title: "Concise guided-reading handout" },
+  { value: "study", label: "Study", title: "Balanced study notes" },
+  { value: "textbook", label: "Textbook", title: "Condensed textbook-style notes" }
+];
 
 async function savePdfGuide(sourceUrl: string, guide: PdfGuideResult): Promise<void> {
   const key = PDF_GUIDE_STORAGE_PREFIX + sourceUrl;
@@ -149,6 +156,7 @@ function App() {
   const [analysisState, setAnalysisState] = useState<AnalyzeState>("idle");
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [analysisError, setAnalysisError] = useState("");
+  const [analysisDetailLevel, setAnalysisDetailLevel] = useState<AnalysisDetailLevel>("study");
   const [rawError, setRawError] = useState("");
   const [sectionAnalyzeState, setSectionAnalyzeState] = useState<Record<string, SectionAnalyzeState>>({});
   const [sectionAnalyzeErrors, setSectionAnalyzeErrors] = useState<Record<string, string>>({});
@@ -1001,6 +1009,7 @@ function App() {
     setSettings(currentSettings);
     const pageKey = targetPageKey;
     const articleForAnalysis = targetArticle;
+    const detailLevel = analysisDetailLevel;
     const analysisVersion = ++analysisVersionRef.current;
     const queuedState = Object.fromEntries(articleForAnalysis.sections.map((section) => [section.id, "queued" as const]));
     let latestAnalysis: AnalysisResult = { overall: { summary: "", why_read: "" }, sections: [] };
@@ -1127,17 +1136,101 @@ function App() {
 
       result =
         documentMode === "pdf" && pdfAnalysisMode === "deep"
-          ? await analyzeDeepPdfProgressively(articleForAnalysis, currentSettings, progressHandler)
+          ? await analyzeDeepPdfProgressively(articleForAnalysis, currentSettings, progressHandler, detailLevel)
           : documentMode === "pdf" && pdfDocumentRef.current
           ? await analyzePdfProgressively({
               article: articleForAnalysis,
               pageImages: pdfImages,
               settings: currentSettings,
-              onProgress: progressHandler
+              onProgress: progressHandler,
+              detailLevel
             })
-          : await analyzeArticleProgressively(articleForAnalysis, currentSettings, progressHandler);
+          : await analyzeArticleProgressively(articleForAnalysis, currentSettings, progressHandler, detailLevel);
       if (analysisVersion !== analysisVersionRef.current) {
         return;
+      }
+
+      let finalSectionState: Record<string, SectionAnalyzeState> = Object.fromEntries(
+        articleForAnalysis.sections.map((section) => [section.id, "done" as const])
+      );
+      let finalSectionErrors: Record<string, string> = {};
+
+      if (documentMode === "article" && hasUsableFeatureModel(currentSettings, "articleVisualRewrite", "multimodal")) {
+        const visualSections = articleForAnalysis.sections.filter((section) => hasSectionVisuals(section));
+        for (const section of visualSections) {
+          if (analysisVersion !== analysisVersionRef.current) {
+            return;
+          }
+          const sectionResult = result.sections.find((candidate) => candidate.id === section.id);
+          if (!sectionResult || !section.visuals?.length) {
+            continue;
+          }
+
+          runningSectionIdRef.current = section.id;
+          finalSectionState = { ...finalSectionState, [section.id]: "running" };
+          latestSectionState = finalSectionState;
+          updateCachedAnalysis(pageKey, articleForAnalysis, result, finalSectionState, finalSectionErrors, "running");
+          void saveAnalysisSession({
+            pageKey,
+            url: articleForAnalysis.url,
+            article: articleForAnalysis,
+            analysis: result,
+            state: "running",
+            sectionState: finalSectionState,
+            sectionErrors: finalSectionErrors,
+            error: "",
+            rawError: ""
+          });
+          if (currentPageKeyRef.current === pageKey) {
+            setSectionAnalyzeState(finalSectionState);
+          }
+
+          try {
+            const rewritten = await rewriteArticleSectionWithVisuals({
+              article: articleForAnalysis,
+              section,
+              sectionAnalysis: sectionResult,
+              visuals: section.visuals,
+              settings: currentSettings
+            });
+            result = {
+              overall: result.overall,
+              sections: result.sections.map((candidate) => (candidate.id === rewritten.id ? rewritten : candidate))
+            };
+            latestAnalysis = result;
+            finalSectionState = { ...finalSectionState, [section.id]: "done" };
+          } catch (error) {
+            finalSectionState = { ...finalSectionState, [section.id]: "error" };
+            finalSectionErrors = { ...finalSectionErrors, [section.id]: (error as Error).message };
+          }
+
+          latestSectionState = finalSectionState;
+          updateCachedAnalysis(pageKey, articleForAnalysis, result, finalSectionState, finalSectionErrors, "running");
+          void persistAnalysisHistorySnapshot(
+            articleForAnalysis,
+            result,
+            cacheRef.current.get(pageKey)?.followUps ?? {},
+            targetDeepPdfParse,
+            cacheRef.current.get(pageKey)?.scrollPos
+          );
+          void saveAnalysisSession({
+            pageKey,
+            url: articleForAnalysis.url,
+            article: articleForAnalysis,
+            analysis: result,
+            state: "running",
+            sectionState: finalSectionState,
+            sectionErrors: finalSectionErrors,
+            error: "",
+            rawError: ""
+          });
+          if (currentPageKeyRef.current === pageKey) {
+            setAnalysis(result);
+            setSectionAnalyzeState(finalSectionState);
+            setSectionAnalyzeErrors(finalSectionErrors);
+          }
+        }
+        runningSectionIdRef.current = null;
       }
 
       const existing = cacheRef.current.get(pageKey);
@@ -1147,8 +1240,8 @@ function App() {
         analysis: result,
         followUps: nextFollowUps,
         analysisState: "done",
-        sectionAnalyzeState: Object.fromEntries(articleForAnalysis.sections.map((section) => [section.id, "done" as const])),
-        sectionAnalyzeErrors: {},
+        sectionAnalyzeState: finalSectionState,
+        sectionAnalyzeErrors: finalSectionErrors,
         analysisError: "",
         rawError: "",
         scrollPos: cacheRef.current.get(pageKey)?.scrollPos
@@ -1166,6 +1259,8 @@ function App() {
         runningSectionIdRef.current = null;
         setAnalysis(result);
         setAnalysisState("done");
+        setSectionAnalyzeState(finalSectionState);
+        setSectionAnalyzeErrors(finalSectionErrors);
       }
     } catch (error) {
       if (analysisVersion !== analysisVersionRef.current) {
@@ -2184,11 +2279,15 @@ function App() {
   const multimodalModelChoices = modelChoices.filter((choice) => choice.isMultimodal);
   const selectedArticleAnalysisModel = settings ? getFeatureModelChoice(settings, "articleAnalysis", "text")?.id ?? "" : "";
   const selectedArticleQuestionModel = settings ? getFeatureModelChoice(settings, "articleQuestion", "text")?.id ?? "" : "";
+  const selectedArticleVisualRewriteModel = settings ? getFeatureModelChoice(settings, "articleVisualRewrite", "multimodal")?.id ?? "" : "";
   const selectedPdfVisualAnalysisModel = settings ? getFeatureModelChoice(settings, "pdfVisualAnalysis", "multimodal")?.id ?? "" : "";
   const selectedPdfVisualQuestionModel = settings ? getFeatureModelChoice(settings, "pdfVisualQuestion", "multimodal")?.id ?? "" : "";
   const selectedPdfDeepAnalysisModel = settings ? getFeatureModelChoice(settings, "pdfDeepAnalysis", "text")?.id ?? "" : "";
   const needsSettings = settings ? !hasUsableFeatureModel(settings, "articleAnalysis", "text") : false;
   const needsArticleQuestionSettings = settings ? !hasUsableFeatureModel(settings, "articleQuestion", "text") : false;
+  const articleHasVisuals = Boolean(article?.sections.some(hasSectionVisuals));
+  const needsArticleVisualRewriteSettings =
+    settings && articleHasVisuals ? !hasUsableFeatureModel(settings, "articleVisualRewrite", "multimodal") : false;
   const needsPdfSettings = settings ? !hasUsableFeatureModel(settings, "pdfVisualAnalysis", "multimodal") : false;
   const needsPdfQuestionSettings = settings ? !hasUsableFeatureModel(settings, "pdfVisualQuestion", "multimodal") : false;
   const needsDeepPdfParserSettings = settings ? !settings.deepPdfParserApiKey.trim() || !settings.deepPdfParserEndpoint.trim() : false;
@@ -2333,6 +2432,7 @@ function App() {
           showAllDeepPdfBoundingBoxes={showAllDeepPdfBoundingBoxes}
           activeQuestionSectionId={activeQuestionSectionId}
           analysis={analysis}
+          analysisDetailLevel={analysisDetailLevel}
           analysisState={analysisState}
           analysisError={analysisError}
           rawAnalysisError={rawError}
@@ -2355,6 +2455,7 @@ function App() {
           selectedVisualAnalysisModel={selectedPdfVisualAnalysisModel}
           selectedVisualQuestionModel={selectedPdfVisualQuestionModel}
           selectedDeepAnalysisModel={selectedPdfDeepAnalysisModel}
+          onAnalysisDetailLevelChange={setAnalysisDetailLevel}
           onFeatureModelChange={updateFeatureModelSelection}
           onPageRangeChange={(value) => {
             if (pdfAnalysisMode === "deep") {
@@ -2411,13 +2512,32 @@ function App() {
             </section>
           )}
 
+          {!needsSettings && needsArticleVisualRewriteSettings && (
+            <section className="warning">
+              <strong>Article image model needed</strong>
+              <span>Text analysis will still run, but image-backed section rewriting needs a multimodal model.</span>
+              <button type="button" onClick={() => chrome.runtime.openOptionsPage()}>
+                Open settings
+              </button>
+            </section>
+          )}
+
           <section className="action-row">
+            <DetailSelect value={analysisDetailLevel} onChange={setAnalysisDetailLevel} />
             <ModelSelect
               label="Text"
               value={selectedArticleAnalysisModel}
               choices={textModelChoices}
               onChange={(value) => updateFeatureModelSelection("articleAnalysis", value)}
             />
+            {articleHasVisuals && (
+              <ModelSelect
+                label="Vision"
+                value={selectedArticleVisualRewriteModel}
+                choices={multimodalModelChoices}
+                onChange={(value) => updateFeatureModelSelection("articleVisualRewrite", value)}
+              />
+            )}
             <button type="button" disabled={analysisState === "running" || needsSettings} onClick={() => void runAnalysis()}>
               {analysisState === "running" ? "Analyzing..." : "Analyze"}
             </button>
@@ -2456,6 +2576,7 @@ function App() {
               const sectionFollowUps = followUps[section.id] ?? [];
               const pending = pendingQuestions[section.id] ?? false;
               const sectionStatus = sectionAnalyzeState[section.id];
+              const sectionHasVisuals = hasSectionVisuals(section);
               const showQA = sectionFollowUps.length > 0 || activeQuestionSectionId === section.id || pending;
               return (
                 <article
@@ -2469,7 +2590,10 @@ function App() {
                   }}
                 >
                   <div className="section-card-header">
-                    <span>H{section.level}</span>
+                    <span className="section-level-badge">H{section.level}</span>
+                    {sectionHasVisuals && (
+                      <span className="section-visual-indicator" role="img" aria-label="Contains image" title="Contains image" />
+                    )}
                     <h3>{section.title}</h3>
                     {sectionStatus && sectionStatus !== "done" && (
                       <span className={`section-status ${sectionStatus}`}>{formatSectionAnalyzeState(sectionStatus)}</span>
@@ -2479,6 +2603,7 @@ function App() {
                     <>
                       <InfoBlock title="Summary" body={result.summary} />
                       <InfoBlock title="What this means" body={result.interpretation} />
+                      {result.visual_description && <InfoBlock title="Image understanding" body={result.visual_description} />}
                       <InfoBlock title="Role in article" body={result.role_in_article} />
                     </>
                   ) : (
@@ -2608,6 +2733,7 @@ function PdfReader({
   showAllDeepPdfBoundingBoxes,
   activeQuestionSectionId,
   analysis,
+  analysisDetailLevel,
   analysisState,
   analysisError,
   rawAnalysisError,
@@ -2630,6 +2756,7 @@ function PdfReader({
   selectedVisualAnalysisModel,
   selectedVisualQuestionModel,
   selectedDeepAnalysisModel,
+  onAnalysisDetailLevelChange,
   onFeatureModelChange,
   onPageRangeChange,
   onQuestionChange,
@@ -2670,6 +2797,7 @@ function PdfReader({
   showAllDeepPdfBoundingBoxes: boolean;
   activeQuestionSectionId: string | null;
   analysis: AnalysisResult | null;
+  analysisDetailLevel: AnalysisDetailLevel;
   analysisState: AnalyzeState;
   analysisError: string;
   rawAnalysisError: string;
@@ -2692,6 +2820,7 @@ function PdfReader({
   selectedVisualAnalysisModel: string;
   selectedVisualQuestionModel: string;
   selectedDeepAnalysisModel: string;
+  onAnalysisDetailLevelChange: (value: AnalysisDetailLevel) => void;
   onFeatureModelChange: (featureKey: FeatureModelKey, modelChoiceId: string) => void;
   onPageRangeChange: (value: string) => void;
   onQuestionChange: (value: string) => void;
@@ -2981,6 +3110,7 @@ function PdfReader({
           <>
             <div className="pdf-analysis-row">
               {pageRangeControl}
+              <DetailSelect value={analysisDetailLevel} onChange={onAnalysisDetailLevelChange} />
               <ModelSelect
                 label="Summary"
                 value={selectedDeepAnalysisModel}
@@ -2998,6 +3128,7 @@ function PdfReader({
         ) : (
           <div className="pdf-analysis-row">
             {pageRangeControl}
+            <DetailSelect value={analysisDetailLevel} onChange={onAnalysisDetailLevelChange} />
             <ModelSelect
               label="Vision"
               value={selectedVisualAnalysisModel}
@@ -3297,6 +3428,31 @@ function HistoryView({
 
 function Status({ text }: { text: string }) {
   return <p className="status">{text}</p>;
+}
+
+function DetailSelect({
+  value,
+  onChange
+}: {
+  value: AnalysisDetailLevel;
+  onChange: (value: AnalysisDetailLevel) => void;
+}) {
+  return (
+    <label className="model-select detail-select" title="Analysis detail">
+      <span className="model-select-label">Depth</span>
+      <select
+        aria-label="Analysis detail"
+        value={value}
+        onChange={(event) => onChange(event.target.value as AnalysisDetailLevel)}
+      >
+        {ANALYSIS_DETAIL_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value} title={option.title}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
 function ModelSelect({
@@ -4046,6 +4202,9 @@ function appendSectionAnalysis(lines: string[], result: AnalysisResult["sections
 
   lines.push(`**Summary:** ${result.summary}`);
   lines.push(`**Interpretation:** ${result.interpretation}`);
+  if (result.visual_description) {
+    lines.push(`**Image understanding:** ${result.visual_description}`);
+  }
   lines.push(`**Role:** ${result.role_in_article}`);
 }
 
@@ -4305,6 +4464,15 @@ function getPdfPageFromSectionId(sectionId: string): number | null {
 
 function isKnownPage(page: number | null): page is number {
   return typeof page === "number";
+}
+
+function hasSectionVisuals(section: ExtractedArticle["sections"][number]): boolean {
+  return Boolean(
+    section.visuals?.some((visual) => {
+      const url = visual.imageDataUrl || visual.src || "";
+      return /^data:image\//i.test(url) || /^https?:\/\//i.test(url);
+    })
+  );
 }
 
 function toDatalabPageRange(pages: number[], pageCount: number): string {

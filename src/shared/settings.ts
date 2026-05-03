@@ -340,6 +340,12 @@ function getFallbackModelIds(settings: Settings, featureKey: FeatureModelKey): s
         settings.featureModelSelections.articleAnalysis ?? "",
         ...findFallbackModelIds(settings, false)
       ].filter(Boolean);
+    case "articleVisualRewrite":
+      return [
+        settings.featureModelSelections.pdfVisualQuestion ?? "",
+        settings.featureModelSelections.pdfVisualAnalysis ?? "",
+        ...findFallbackModelIds(settings, true)
+      ].filter(Boolean);
     case "pdfVisualAnalysis":
       return findFallbackModelIds(settings, true);
     case "pdfVisualQuestion":

@@ -1,8 +1,10 @@
 import type {
+  AnalysisDetailLevel,
   AnalysisSection,
   AnalysisResult,
   ExtractedArticle,
   ExtractedSection,
+  ExtractedSectionVisual,
   OutputLanguage,
   PdfGuideResult,
   PdfSelectionReference,
@@ -17,10 +19,8 @@ const MAX_SECTION_CHARS = 3600;
 const MAX_FOLLOW_UP_SECTION_CHARS = 9000;
 const FOLLOW_UP_MARKDOWN_FORMAT_INSTRUCTION =
   "Format the answer as standard Markdown when structure helps: use headings, bullet/numbered lists, blockquotes, fenced code, math, and GitHub-style tables with blank lines around block elements. Do not use HTML.";
-const INTERPRETATION_GUIDANCE =
-  "For each section.interpretation, write a 'What this means' explanation that is long enough for learning. Use a real markdown bullet list by default: each item must start on its own line with '- '. Inside JSON/NDJSON strings, encode those line breaks as \\n. Keep it to 2-4 bullets， more is okay if the section contains substantial content. Use a compact markdown table only when comparison is clearer. Do not put bullets inline in one sentence. Avoid dense paragraphs, abstract wording, and long caveats. Put the most important takeaway in **bold**.";
-
-// , for example '- **Why it matters:** ...\\n- **Use it for:** ...\\n- **Watch out:** ...'
+const INTERPRETATION_MARKDOWN_RULES =
+  "Use real Markdown block structure: each bullet must start on its own line with '- '. Inside JSON/NDJSON strings, encode those line breaks as \\n. Use a compact markdown table only when comparison is clearer. Do not put bullets inline in one sentence. Put the most important takeaway in **bold**.";
 
 type OpenAIResponse = {
   choices?: Array<{
@@ -44,13 +44,18 @@ type OpenAIStreamChunk = {
   };
 };
 
+type VisionImageInput = {
+  url: string;
+};
+
 export type AnalysisProgressEvent =
   | { type: "overall"; overall: AnalysisResult["overall"] }
   | { type: "section"; section: AnalysisSection };
 
 export async function analyzeArticle(
   article: ExtractedArticle,
-  settings: Settings
+  settings: Settings,
+  detailLevel: AnalysisDetailLevel = "study"
 ): Promise<AnalysisResult> {
   const client = getArticleAnalysisClientConfig(settings);
   const apiKey = client.apiKey;
@@ -76,7 +81,7 @@ export async function analyzeArticle(
         },
         {
           role: "user",
-          content: buildPrompt(article, settings.outputLanguage)
+          content: buildPrompt(article, settings.outputLanguage, detailLevel)
         }
       ]
     })
@@ -98,7 +103,8 @@ export async function analyzeArticle(
 export async function analyzeArticleProgressively(
   article: ExtractedArticle,
   settings: Settings,
-  onProgress: (event: AnalysisProgressEvent) => void
+  onProgress: (event: AnalysisProgressEvent) => void,
+  detailLevel: AnalysisDetailLevel = "study"
 ): Promise<AnalysisResult> {
   const client = getArticleAnalysisClientConfig(settings);
   const apiKey = client.apiKey;
@@ -124,7 +130,7 @@ export async function analyzeArticleProgressively(
         },
         {
           role: "user",
-          content: buildProgressivePrompt(article, settings.outputLanguage)
+          content: buildProgressivePrompt(article, settings.outputLanguage, detailLevel)
         }
       ]
     })
@@ -200,12 +206,14 @@ export async function analyzePdfProgressively({
   article,
   pageImages,
   settings,
-  onProgress
+  onProgress,
+  detailLevel = "study"
 }: {
   article: ExtractedArticle;
   pageImages: PdfPageImage[];
   settings: Settings;
   onProgress: (event: AnalysisProgressEvent) => void;
+  detailLevel?: AnalysisDetailLevel;
 }): Promise<AnalysisResult> {
   const client = getPdfVisualAnalysisClientConfig(settings);
   const apiKey = client.apiKey;
@@ -231,7 +239,7 @@ export async function analyzePdfProgressively({
     },
     body: JSON.stringify({
       model: pdfModel,
-      max_tokens: Math.max(2600, Math.min(16000, pageImages.length * 520)),
+      max_tokens: getProgressiveMaxTokens(pageImages.length, detailLevel),
       temperature: 0.2,
       stream: true,
       messages: [
@@ -245,7 +253,7 @@ export async function analyzePdfProgressively({
           content: [
             {
               type: "text",
-              text: buildPdfProgressivePrompt(article, pageImages.map((image) => image.page), settings.outputLanguage)
+              text: buildPdfProgressivePrompt(article, pageImages.map((image) => image.page), settings.outputLanguage, detailLevel)
             },
             ...pageImages.map((image) => ({
               type: "image_url",
@@ -278,7 +286,8 @@ export async function analyzePdfProgressively({
 export async function analyzeDeepPdfProgressively(
   article: ExtractedArticle,
   settings: Settings,
-  onProgress: (event: AnalysisProgressEvent) => void
+  onProgress: (event: AnalysisProgressEvent) => void,
+  detailLevel: AnalysisDetailLevel = "study"
 ): Promise<AnalysisResult> {
   const client = getDeepPdfAnalysisClientConfig(settings);
   const apiKey = client.apiKey;
@@ -313,7 +322,7 @@ export async function analyzeDeepPdfProgressively(
         },
         {
           role: "user",
-          content: buildDeepPdfProgressivePrompt(article, settings.outputLanguage)
+          content: buildDeepPdfProgressivePrompt(article, settings.outputLanguage, detailLevel)
         }
       ]
     })
@@ -433,6 +442,41 @@ export async function analyzeArticleSection({
     throw new Error("Model response did not contain choices[0].message.content.");
   }
 
+  return parseSectionAnalysis(raw, section.id);
+}
+
+export async function rewriteArticleSectionWithVisuals({
+  article,
+  section,
+  sectionAnalysis,
+  visuals,
+  settings
+}: {
+  article: ExtractedArticle;
+  section: ExtractedSection;
+  sectionAnalysis: AnalysisSection;
+  visuals: ExtractedSectionVisual[];
+  settings: Settings;
+}): Promise<AnalysisSection> {
+  const images = visuals
+    .map((visual) => visual.imageDataUrl || visual.src || "")
+    .filter((url) => /^data:image\//i.test(url) || /^https?:\/\//i.test(url));
+  if (images.length === 0) {
+    return sectionAnalysis;
+  }
+
+  const raw = await requestVision({
+    images: images.slice(0, 3).map((url) => ({ url })),
+    prompt: buildArticleVisualRewritePrompt({
+      article,
+      section,
+      sectionAnalysis,
+      visuals,
+      outputLanguage: settings.outputLanguage
+    }),
+    client: getArticleVisualRewriteClientConfig(settings),
+    maxTokens: 2200
+  });
   return parseSectionAnalysis(raw, section.id);
 }
 
@@ -615,6 +659,28 @@ async function requestPdfVision({
   client?: FeatureModelClientConfig;
   maxTokens: number;
 }): Promise<string> {
+  return requestVision({
+    images: [
+      ...pageImages.map((image) => ({ url: image.dataUrl })),
+      ...supplementalImageDataUrls.map((url) => ({ url }))
+    ],
+    prompt,
+    client,
+    maxTokens
+  });
+}
+
+async function requestVision({
+  images,
+  prompt,
+  client,
+  maxTokens
+}: {
+  images: VisionImageInput[];
+  prompt: string;
+  client: FeatureModelClientConfig;
+  maxTokens: number;
+}): Promise<string> {
   const apiKey = client.apiKey;
   if (!apiKey) {
     throw new Error(client.missingApiKeyMessage);
@@ -648,16 +714,10 @@ async function requestPdfVision({
               type: "text",
               text: prompt
             },
-            ...pageImages.map((image) => ({
+            ...images.map((image) => ({
               type: "image_url",
               image_url: {
-                url: image.dataUrl
-              }
-            })),
-            ...supplementalImageDataUrls.map((dataUrl) => ({
-              type: "image_url",
-              image_url: {
-                url: dataUrl
+                url: image.url
               }
             }))
           ]
@@ -697,6 +757,14 @@ function getArticleQuestionClientConfig(settings: Settings): FeatureModelClientC
     missingApiKeyMessage: "Missing article Q&A API key. Open settings and add the selected model API key.",
     missingEndpointMessage: "Missing article Q&A endpoint. Open settings and add the selected model endpoint.",
     missingModelMessage: "Missing article Q&A model. Open settings and choose a model."
+  });
+}
+
+function getArticleVisualRewriteClientConfig(settings: Settings): FeatureModelClientConfig {
+  return getFeatureModelClientConfig(settings, "articleVisualRewrite", "multimodal", {
+    missingApiKeyMessage: "Missing article image rewrite API key. Open settings and add the selected multimodal model API key.",
+    missingEndpointMessage: "Missing article image rewrite endpoint. Open settings and add the selected model endpoint.",
+    missingModelMessage: "Missing article image rewrite model. Open settings and choose a multimodal model."
   });
 }
 
@@ -832,7 +900,76 @@ function extractContentText(value: unknown): string {
   return "";
 }
 
-function buildPrompt(article: ExtractedArticle, outputLanguage: OutputLanguage): string {
+function buildDetailGuidance(detailLevel: AnalysisDetailLevel): string {
+  if (detailLevel === "handout") {
+    return [
+      "Detail level: Handout.",
+      "Write like a concise guided-reading handout: fast to scan, useful before class or before reading the full text.",
+      "Keep overall.summary to 1-2 compact sentences and overall.why_read to 1 compact sentence.",
+      "For each section, keep summary to 1 sentence, interpretation to 2-3 real bullets, and role_in_article to 1 short sentence.",
+      "Prioritize the core claim, the must-remember concept, and why the section exists. Avoid examples unless they are essential."
+    ].join(" ");
+  }
+
+  if (detailLevel === "textbook") {
+    return [
+      "Detail level: Textbook.",
+      "Write like compact textbook notes for self-study, not a slide summary.",
+      "Treat section.interpretation as the teaching surface: unpack definitions, mechanisms, examples, assumptions, consequences, and how the section fits the article.",
+      "Do not compress bullets into slogans. A bullet may contain multiple sentences when the concept needs explanation.",
+      "Use bold like **the new paradigm of AI application eval** when it helps identify the concept being taught."
+    ].join(" ");
+  }
+
+  return [
+    "Detail level: Study.",
+    "Write balanced study notes: more useful than a skim, but still compact.",
+    "For each section.interpretation, use 3-5 real bullets by default. Explain the central idea, why it matters, and how it connects to the article."
+  ].join(" ");
+}
+
+function buildInterpretationGuidance(
+  detailLevel: AnalysisDetailLevel,
+  target: "section.interpretation" | "interpretation" = "section.interpretation"
+): string {
+  const prefix = target === "interpretation" ? "For interpretation" : "For each section.interpretation";
+
+  if (detailLevel === "handout") {
+    return [
+      `${prefix}, write a quick 'What this means' explanation for learning.`,
+      "Use 2-3 real bullets. Each bullet may be one or two sentences, but stay focused on the core claim, the must-remember concept, and why the section exists.",
+      "Avoid examples unless they are essential.",
+      INTERPRETATION_MARKDOWN_RULES
+    ].join(" ");
+  }
+
+  if (detailLevel === "textbook") {
+    return [
+      `${prefix}, write a textbook-style 'What this means' lesson, not a one-line paraphrase.`,
+      "Use 4-7 real bullets by default. Each bullet must be a mini-explanation of 2-4 sentences, or one short paragraph plus a concrete example, analogy, condition, or contrast when helpful.",
+      "Teach the concept explicitly: define the key term, unpack the mechanism or causal logic, explain why it matters, show how the evidence/example supports it, and connect it to nearby sections.",
+      "Do not use single-sentence bullets unless the source section is trivial. If the source contains multiple concepts, split them into separate bullets so a student can study from the result without asking a follow-up.",
+      "Prefer concrete instructional language over abstract labels. Include formulas, conditions, contrasts, examples, or failure cases when they are present or necessary to understand the concept.",
+      INTERPRETATION_MARKDOWN_RULES
+    ].join(" ");
+  }
+
+  return [
+    `${prefix}, write a 'What this means' explanation that is long enough for learning.`,
+    "Use 3-5 real bullets by default. Each bullet should usually have 1-3 sentences explaining the central idea, why it matters, and how it connects to the article.",
+    "Avoid dense paragraphs, abstract wording, and long caveats.",
+    INTERPRETATION_MARKDOWN_RULES
+  ].join(" ");
+}
+
+function getProgressiveMaxTokens(sectionCount: number, detailLevel: AnalysisDetailLevel): number {
+  const perSection = detailLevel === "handout" ? 360 : detailLevel === "textbook" ? 1200 : 520;
+  const floor = detailLevel === "textbook" ? 6000 : 2600;
+  const ceiling = detailLevel === "textbook" ? 24000 : 16000;
+  return Math.max(floor, Math.min(ceiling, sectionCount * perSection));
+}
+
+function buildPrompt(article: ExtractedArticle, outputLanguage: OutputLanguage, detailLevel: AnalysisDetailLevel = "study"): string {
   const languageInstruction =
     outputLanguage === "follow-page"
       ? `Use the same language as the article when possible. Detected page language: ${article.language || "unknown"}.`
@@ -842,6 +979,7 @@ function buildPrompt(article: ExtractedArticle, outputLanguage: OutputLanguage):
 
   return [
     languageInstruction,
+    buildDetailGuidance(detailLevel),
     "Analyze this article for a reader who wants to learn from it, not just skim it.",
     "Return strict JSON with exactly this shape:",
     `{
@@ -861,7 +999,7 @@ function buildPrompt(article: ExtractedArticle, outputLanguage: OutputLanguage):
     "For overall.why_read, answer the high-level learning goal: why this is worth reading, and what worldview, values, mental model, or life perspective it may offer.",
     "Use **bold** in every user-facing analysis field to mark the key term, claim, contrast, problem, or contribution. This applies to overall.summary, overall.why_read, section.summary, section.interpretation, and section.role_in_article.",
     "For each section.summary, summarize only what this section says, with the main point in **bold**.",
-    INTERPRETATION_GUIDANCE,
+    buildInterpretationGuidance(detailLevel),
     [
       "For each section.role_in_article, be concise: 1-2 short sentences only.",
       "Explain how this section changes or advances the article by referencing nearby or related sections when useful.",
@@ -900,7 +1038,11 @@ function buildOverviewPrompt(article: ExtractedArticle, outputLanguage: OutputLa
   ].join("\n");
 }
 
-function buildProgressivePrompt(article: ExtractedArticle, outputLanguage: OutputLanguage): string {
+function buildProgressivePrompt(
+  article: ExtractedArticle,
+  outputLanguage: OutputLanguage,
+  detailLevel: AnalysisDetailLevel = "study"
+): string {
   const languageInstruction =
     outputLanguage === "follow-page"
       ? [
@@ -913,6 +1055,7 @@ function buildProgressivePrompt(article: ExtractedArticle, outputLanguage: Outpu
 
   return [
     languageInstruction,
+    buildDetailGuidance(detailLevel),
     "Analyze this article for a reader who wants to learn from it, not just skim it.",
     "Return newline-delimited JSON. Each line must be one complete compact JSON object. Do not output an array. Do not pretty-print. Do not use markdown fences.",
     "First output exactly one overall line:",
@@ -923,7 +1066,7 @@ function buildProgressivePrompt(article: ExtractedArticle, outputLanguage: Outpu
     "Use **bold** in every user-facing analysis field to mark the key term, claim, contrast, problem, or contribution.",
     "For overall.why_read, answer the high-level learning goal: why this is worth reading, and what worldview, values, mental model, or life perspective it may offer.",
     "For each section.summary, summarize only what this section says, with the main point in **bold**.",
-    INTERPRETATION_GUIDANCE,
+    buildInterpretationGuidance(detailLevel),
     "For each section.role_in_article, be concise: 1-2 short sentences only. Explain how this section changes or advances the article by referencing nearby or related sections when useful.",
     "Do not invent section ids. Include one section line per input section.",
     "",
@@ -931,8 +1074,13 @@ function buildProgressivePrompt(article: ExtractedArticle, outputLanguage: Outpu
   ].join("\n");
 }
 
-function buildPdfProgressivePrompt(article: ExtractedArticle, pages: number[], outputLanguage: OutputLanguage): string {
-  const basePrompt = buildProgressivePrompt(article, outputLanguage);
+function buildPdfProgressivePrompt(
+  article: ExtractedArticle,
+  pages: number[],
+  outputLanguage: OutputLanguage,
+  detailLevel: AnalysisDetailLevel = "study"
+): string {
+  const basePrompt = buildProgressivePrompt(article, outputLanguage, detailLevel);
   return [
     basePrompt,
     "",
@@ -945,8 +1093,12 @@ function buildPdfProgressivePrompt(article: ExtractedArticle, pages: number[], o
   ].join("\n");
 }
 
-function buildDeepPdfProgressivePrompt(article: ExtractedArticle, outputLanguage: OutputLanguage): string {
-  const basePrompt = buildProgressivePrompt(article, outputLanguage);
+function buildDeepPdfProgressivePrompt(
+  article: ExtractedArticle,
+  outputLanguage: OutputLanguage,
+  detailLevel: AnalysisDetailLevel = "study"
+): string {
+  const basePrompt = buildProgressivePrompt(article, outputLanguage, detailLevel);
   return [
     basePrompt,
     "",
@@ -994,7 +1146,7 @@ function buildSingleSectionPrompt({
   "role_in_article": "string"
 }`,
     "For summary, summarize only what this section says, with the main point in **bold**.",
-    INTERPRETATION_GUIDANCE.replace("For each section.interpretation", "For interpretation"),
+    buildInterpretationGuidance("study", "interpretation"),
     "For role_in_article, be concise: 1-2 short sentences only. Explain how this section changes or advances the article by referencing nearby or related sections when useful. Use **bold** around the key problem, shift, or contribution.",
     "Do not invent section ids.",
     "",
@@ -1011,6 +1163,76 @@ function buildSingleSectionPrompt({
     `Target section level: H${section.level}`,
     "Target section text:",
     truncate(section.text, MAX_SECTION_CHARS)
+  ].join("\n");
+}
+
+function buildArticleVisualRewritePrompt({
+  article,
+  section,
+  sectionAnalysis,
+  visuals,
+  outputLanguage
+}: {
+  article: ExtractedArticle;
+  section: ExtractedSection;
+  sectionAnalysis: AnalysisSection;
+  visuals: ExtractedSectionVisual[];
+  outputLanguage: OutputLanguage;
+}): string {
+  const languageInstruction =
+    outputLanguage === "follow-page"
+      ? `Use the same language as the article when possible. Detected page language: ${article.language || "unknown"}.`
+      : outputLanguage === "zh"
+        ? "Write all user-facing fields in Chinese."
+        : "Write all user-facing fields in English.";
+  const visualContext = visuals
+    .map((visual, index) =>
+      [
+        `VISUAL ${index + 1}`,
+        `kind: ${visual.kind}`,
+        visual.alt ? `alt: ${visual.alt}` : "",
+        visual.caption ? `caption: ${visual.caption}` : "",
+        visual.src ? `source: ${visual.src}` : ""
+      ].filter(Boolean).join("\n")
+    )
+    .join("\n\n");
+
+  return [
+    languageInstruction,
+    "You are improving an existing section analysis after seeing the section's image, GIF frame, or visual component screenshot.",
+    "The text-only analysis is already useful. Rewrite it only where the visuals add concrete meaning. Do not discard the original textual argument.",
+    "Return strict JSON with exactly this shape:",
+    `{
+  "id": "same section id from input",
+  "title": "optional short title",
+  "summary": "rewritten string",
+  "interpretation": "rewritten string",
+  "role_in_article": "rewritten string",
+  "visual_description": "concise concrete description of what the visual shows and why it matters"
+}`,
+    "For visual_description, describe visible structure, labels, relationships, examples, UI states, chart trends, or interaction cues. Avoid generic phrases like 'the image illustrates the concept'.",
+    "For summary, mention the visual only if it changes what the section says.",
+    "For interpretation, explicitly connect the visual evidence to the section's idea. Use real markdown bullets with '\\n- ' line breaks when helpful. Put the key visual takeaway in **bold**.",
+    "For role_in_article, stay concise: 1-2 short sentences. Explain how the text plus visual moves the article forward.",
+    "Use **bold** in the rewritten user-facing fields to mark the key term, claim, contrast, or visual takeaway.",
+    "Do not invent section ids. Do not describe visuals that are not visible in the attached images.",
+    "",
+    `Article title: ${article.title}`,
+    `Article URL: ${article.url}`,
+    `Article excerpt: ${truncate(article.excerpt, 1200)}`,
+    "",
+    `Target section id: ${section.id}`,
+    `Target section title: ${section.title}`,
+    "Target section text:",
+    truncate(section.text, MAX_FOLLOW_UP_SECTION_CHARS),
+    "",
+    "Existing text-only analysis:",
+    `summary: ${sectionAnalysis.summary}`,
+    `interpretation: ${sectionAnalysis.interpretation}`,
+    `role_in_article: ${sectionAnalysis.role_in_article}`,
+    "",
+    "Visual metadata:",
+    visualContext || "No visual metadata available. Use only the attached image content."
   ].join("\n");
 }
 
