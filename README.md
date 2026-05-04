@@ -50,9 +50,9 @@ Then open Chrome:
 1. Go to `chrome://extensions`.
 2. Enable Developer mode.
 3. Choose Load unpacked.
-4. Select `/Users/h/ai/ext/learn/dist`.
+4. Select the generated `dist/` directory.
 
-If you accidentally select `/Users/h/ai/ext/learn`, that also works after `npm run build`; the root `manifest.json` points Chrome at the built files in `dist/`.
+If you accidentally select the project root, that also works after `npm run build`; the root `manifest.json` points Chrome at the built files in `dist/`.
 
 ## Settings
 
