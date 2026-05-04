@@ -81,6 +81,8 @@ import "katex/dist/katex.min.css";
 import "./styles.css";
 
 const PDF_GUIDE_STORAGE_PREFIX = "learnPanelPdfGuide_";
+const PDF_PREVIEW_INITIAL_RADIUS = 2;
+const PDF_PREVIEW_IMAGE_CACHE_LIMIT = 10;
 const ANALYSIS_DETAIL_OPTIONS: Array<{ value: AnalysisDetailLevel; label: string; title: string }> = [
   { value: "handout", label: "Handout", title: "Concise guided-reading handout" },
   { value: "study", label: "Study", title: "Balanced study notes" },
@@ -205,6 +207,7 @@ function App() {
   const cacheRef = useRef(new Map<string, PageCacheEntry>());
   const historyImportInputRef = useRef<HTMLInputElement | null>(null);
   const pdfDocumentRef = useRef<LoadedPdfDocument | null>(null);
+  const pdfPreviewRequestsRef = useRef<Set<number>>(new Set());
   const currentPageKeyRef = useRef("");
   const loadVersionRef = useRef(0);
   const pdfPreviewVersionRef = useRef(0);
@@ -488,6 +491,7 @@ function App() {
         setPdfGuideError("");
         setPdfGuideRawError("");
         setPdfPageImages([]);
+        pdfPreviewRequestsRef.current.clear();
         setPdfPreviewState("idle");
         setPdfPreviewError("");
         setPdfAnalysisMode("visual");
@@ -559,6 +563,7 @@ function App() {
       setPdfGuideError("");
       setPdfGuideRawError("");
       setPdfPageImages([]);
+      pdfPreviewRequestsRef.current.clear();
       setPdfPreviewState("idle");
       setPdfPreviewError("");
       setPdfAnalysisMode("visual");
@@ -670,6 +675,7 @@ function App() {
     setPdfGuideError("");
     setPdfGuideRawError("");
     setPdfPageImages([]);
+    pdfPreviewRequestsRef.current.clear();
     setPdfPreviewState("idle");
     setPdfPreviewError("");
     setPdfAnalysisMode("visual");
@@ -789,14 +795,12 @@ function App() {
     setPdfPreviewState("rendering");
     setPdfPreviewError("");
     setPdfPageImages([]);
+    pdfPreviewRequestsRef.current.clear();
 
     try {
-      for (let page = 1; page <= loadedPdf.pageCount; page += 1) {
-        const image = await renderPdfPage(loadedPdf.pdf, page);
-        if (previewVersion !== pdfPreviewVersionRef.current || pdfDocumentRef.current?.url !== loadedPdf.url) {
-          return;
-        }
-        setPdfPageImages((images) => [...images, image]);
+      const targetPage = Math.min(getPdfTargetPageFromUrl(loadedPdf.url), loadedPdf.pageCount);
+      for (const page of getPdfPreviewWindow(targetPage, loadedPdf.pageCount)) {
+        await requestPdfPreviewPage(page, previewVersion);
       }
       setPdfPreviewState("ready");
     } catch (error) {
@@ -805,6 +809,27 @@ function App() {
       }
       setPdfPreviewState("error");
       setPdfPreviewError((error as Error).message);
+    }
+  }
+
+  async function requestPdfPreviewPage(page: number, version = pdfPreviewVersionRef.current) {
+    const loadedPdf = pdfDocumentRef.current;
+    if (!loadedPdf || page < 1 || page > loadedPdf.pageCount) {
+      return;
+    }
+    if (pdfPageImages.some((image) => image.page === page) || pdfPreviewRequestsRef.current.has(page)) {
+      return;
+    }
+
+    pdfPreviewRequestsRef.current.add(page);
+    try {
+      const image = await renderPdfPage(loadedPdf.pdf, page);
+      if (version !== pdfPreviewVersionRef.current || pdfDocumentRef.current?.url !== loadedPdf.url) {
+        return;
+      }
+      setPdfPageImages((images) => prunePdfPageImages(mergePdfPageImages(images, [image]), page, loadedPdf.pageCount));
+    } finally {
+      pdfPreviewRequestsRef.current.delete(page);
     }
   }
 
@@ -1130,10 +1155,6 @@ function App() {
               articleForAnalysis.sections.map((section) => getPdfPageFromSectionId(section.id)).filter(isKnownPage)
             )
           : [];
-      if (pdfImages.length > 0) {
-        setPdfPageImages((images) => mergePdfPageImages(images, pdfImages));
-      }
-
       result =
         documentMode === "pdf" && pdfAnalysisMode === "deep"
           ? await analyzeDeepPdfProgressively(articleForAnalysis, currentSettings, progressHandler, detailLevel)
@@ -1558,7 +1579,7 @@ function App() {
         cacheRef.current.set(pageKey, { article: pdfArticle, analysis: guideAnalysis, followUps: {} });
         applyPage(pdfArticle, guideAnalysis, pageKey);
       }
-      const visualPage = getNearestRenderedPdfPage(focusPage, pdfPageImages, loadedPdf.pageCount);
+      const visualPage = Math.max(1, Math.min(focusPage, loadedPdf.pageCount));
       setPdfTargetPage(String(visualPage));
       scrollPanelToPdfPageSoon(visualPage);
       void sendToViewer({ type: "LEARN_PANEL_SCROLL_TO_PDF_PAGE", page: visualPage, scrollBehavior: "instant" }).catch(() => undefined);
@@ -2475,6 +2496,7 @@ function App() {
           onRemoveSelectionReference={removePdfSelectionReference}
           onOpenCardQuestion={(sectionId) => void openPdfCardQuestion(sectionId)}
           onAskCardQuestion={(sectionId) => void askPdfCardQuestion(sectionId)}
+          onRequestPagePreview={(page) => void requestPdfPreviewPage(page)}
           onGenerateGuide={() => void runAnalysis()}
           onParseDeepPdf={() => void runDeepPdfAction()}
           onModeChange={switchPdfAnalysisMode}
@@ -2765,6 +2787,7 @@ function PdfReader({
   onRemoveSelectionReference,
   onOpenCardQuestion,
   onAskCardQuestion,
+  onRequestPagePreview,
   onGenerateGuide,
   onParseDeepPdf,
   onModeChange,
@@ -2829,6 +2852,7 @@ function PdfReader({
   onRemoveSelectionReference: (referenceLabel: string) => void;
   onOpenCardQuestion: (sectionId: string) => void;
   onAskCardQuestion: (sectionId: string) => void;
+  onRequestPagePreview: (page: number) => void;
   onGenerateGuide: () => void;
   onParseDeepPdf: () => void;
   onModeChange: (mode: PdfAnalysisMode) => void;
@@ -2842,6 +2866,7 @@ function PdfReader({
   const focusedPage = Number(targetPage);
   const horizontalSwipeRef = useRef({ deltaX: 0, resetTimer: 0, lastSwitchAt: 0 });
   const guideByPage = useMemo(() => new Map((guide?.pages ?? []).map((pageGuide) => [pageGuide.page, pageGuide])), [guide]);
+  const pageImageByPage = useMemo(() => new Map(pageImages.map((image) => [image.page, image])), [pageImages]);
   const analysisByPage = useMemo(() => {
     const map = new Map<number, AnalysisResult["sections"][number]>();
     analysis?.sections.forEach((section) => {
@@ -2852,8 +2877,9 @@ function PdfReader({
     });
     return map;
   }, [analysis]);
-  const completedPages = pageImages.filter((image) => sectionAnalyzeState[`${PDF_PAGE_SECTION_PREFIX}${image.page}`] === "done").length;
-  const runningPage = pageImages.find((image) => sectionAnalyzeState[`${PDF_PAGE_SECTION_PREFIX}${image.page}`] === "running")?.page;
+  const pdfPages = useMemo(() => Array.from({ length: pdfDocument.pageCount }, (_, index) => index + 1), [pdfDocument.pageCount]);
+  const completedPages = pdfPages.filter((page) => sectionAnalyzeState[`${PDF_PAGE_SECTION_PREFIX}${page}`] === "done").length;
+  const runningPage = pdfPages.find((page) => sectionAnalyzeState[`${PDF_PAGE_SECTION_PREFIX}${page}`] === "running");
   const completedDeepSections = deepPdfParse
     ? deepPdfParse.sections.filter((section) => sectionAnalyzeState[section.id] === "done").length
     : 0;
@@ -2885,6 +2911,30 @@ function PdfReader({
       : "Analyze parsed pages";
   const canRunPageRangeAction = pdfAnalysisMode === "deep" ? canRunDeepAction : canGenerateGuide;
   const runPageRangeAction = pdfAnalysisMode === "deep" ? onParseDeepPdf : onGenerateGuide;
+  useEffect(() => {
+    if (pdfAnalysisMode !== "visual") {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) {
+            return;
+          }
+          const page = Number((entry.target as HTMLElement).dataset.learnPanelPdfPage);
+          if (Number.isInteger(page)) {
+            onRequestPagePreview(page);
+          }
+        });
+      },
+      { rootMargin: "900px 0px" }
+    );
+
+    document.querySelectorAll<HTMLElement>("[data-learn-panel-pdf-page]").forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [onRequestPagePreview, pdfAnalysisMode, pdfDocument.pageCount]);
+
   useEffect(() => {
     const switchMode = (mode: PdfAnalysisMode) => {
       if (mode !== pdfAnalysisMode) {
@@ -3267,10 +3317,10 @@ function PdfReader({
         <div className="pdf-pages-header">
           <h2>Pages</h2>
           <span>
-            {pageImages.length} / {pdfDocument.pageCount} rendered
+            {pageImages.length} / {pdfDocument.pageCount} previews ready
           </span>
         </div>
-        {previewState === "rendering" && <Status text="Rendering PDF page previews..." />}
+        {previewState === "rendering" && <Status text="Preparing PDF page previews..." />}
         {previewState === "error" && (
           <section className="error-box">
             <strong>PDF preview failed</strong>
@@ -3278,46 +3328,51 @@ function PdfReader({
           </section>
         )}
         <div className="pdf-page-list">
-          {pageImages.map((image) => {
-            const pageGuide = guideByPage.get(image.page);
-            const pageAnalysis = analysisByPage.get(image.page);
-            const sectionId = `${PDF_PAGE_SECTION_PREFIX}${image.page}`;
+          {pdfPages.map((page) => {
+            const image = pageImageByPage.get(page);
+            const pageGuide = guideByPage.get(page);
+            const pageAnalysis = analysisByPage.get(page);
+            const sectionId = `${PDF_PAGE_SECTION_PREFIX}${page}`;
             const pageStatus = sectionAnalyzeState[sectionId];
-            const generatedTitle = formatGeneratedPdfTitle(pageAnalysis?.title ?? pageGuide?.title, image.page);
+            const generatedTitle = formatGeneratedPdfTitle(pageAnalysis?.title ?? pageGuide?.title, page);
             return (
               <article
-                className={`pdf-page-card${image.page === focusedPage ? " active" : ""}${image.page === followedPdfPage ? " followed" : ""}`}
-                data-learn-panel-pdf-page={image.page}
-                key={image.page}
-                onClick={() => onFocusPage(image.page)}
+                className={`pdf-page-card${page === focusedPage ? " active" : ""}${page === followedPdfPage ? " followed" : ""}`}
+                data-learn-panel-pdf-page={page}
+                key={page}
+                onClick={() => onFocusPage(page)}
                 onContextMenu={(event) => {
                   event.preventDefault();
-                  onFocusPage(image.page);
+                  onFocusPage(page);
                   onOpenCardQuestion(sectionId);
                 }}
               >
                 <div className="pdf-page-header">
-                  <span>{formatPdfPageHeaderTitle(image.page, image.page, generatedTitle)}</span>
-                  {image.page === focusedPage && <strong>Focus</strong>}
+                  <span>{formatPdfPageHeaderTitle(page, page, generatedTitle)}</span>
+                  {page === focusedPage && <strong>Focus</strong>}
                   {pageStatus && pageStatus !== "done" && (
                     <span className={`section-status ${pageStatus}`}>{formatSectionAnalyzeState(pageStatus)}</span>
                   )}
                 </div>
                 {pageAnalysis ? (
                   <div className="pdf-page-guide">
-                    <InfoBlock title="Summary" body={pageAnalysis.summary} pdfPage={image.page} />
-                    <InfoBlock title="What this means" body={pageAnalysis.interpretation} pdfPage={image.page} />
-                    <InfoBlock title="Role in PDF" body={pageAnalysis.role_in_article} pdfPage={image.page} />
+                    <InfoBlock title="Summary" body={pageAnalysis.summary} pdfPage={page} />
+                    <InfoBlock title="What this means" body={pageAnalysis.interpretation} pdfPage={page} />
+                    <InfoBlock title="Role in PDF" body={pageAnalysis.role_in_article} pdfPage={page} />
                   </div>
                 ) : pageGuide ? (
                   <div className="pdf-page-guide">
-                    <InfoBlock title="Summary" body={pageGuide.summary} pdfPage={image.page} />
-                    <InfoBlock title="Explanation" body={pageGuide.explanation} pdfPage={image.page} />
-                    <InfoBlock title="Goal" body={pageGuide.goal} pdfPage={image.page} />
+                    <InfoBlock title="Summary" body={pageGuide.summary} pdfPage={page} />
+                    <InfoBlock title="Explanation" body={pageGuide.explanation} pdfPage={page} />
+                    <InfoBlock title="Goal" body={pageGuide.goal} pdfPage={page} />
+                  </div>
+                ) : image ? (
+                  <div className="pdf-page-image-button">
+                    <img src={image.dataUrl} alt={`PDF page ${page}`} loading="lazy" />
                   </div>
                 ) : (
                   <div className="pdf-page-image-button">
-                    <img src={image.dataUrl} alt={`PDF page ${image.page}`} loading="lazy" />
+                    <span>Preview loads when visible.</span>
                   </div>
                 )}
                 {!pageAnalysis && pageStatus && pageStatus !== "done" && (
@@ -4518,6 +4573,23 @@ function mergePdfPageImages(existing: PdfPageImage[], next: PdfPageImage[]): Pdf
   const byPage = new Map(existing.map((image) => [image.page, image]));
   next.forEach((image) => byPage.set(image.page, image));
   return [...byPage.values()].sort((a, b) => a.page - b.page);
+}
+
+function getPdfPreviewWindow(anchorPage: number, pageCount: number): number[] {
+  const start = Math.max(1, anchorPage - PDF_PREVIEW_INITIAL_RADIUS);
+  const end = Math.min(pageCount, anchorPage + PDF_PREVIEW_INITIAL_RADIUS);
+  return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+}
+
+function prunePdfPageImages(images: PdfPageImage[], anchorPage: number, pageCount: number): PdfPageImage[] {
+  const keepPages = new Set(getPdfPreviewWindow(anchorPage, pageCount));
+  const sorted = [...images].sort((a, b) => {
+    const distance = Math.abs(a.page - anchorPage) - Math.abs(b.page - anchorPage);
+    return distance || a.page - b.page;
+  });
+  return sorted
+    .filter((image, index) => index < PDF_PREVIEW_IMAGE_CACHE_LIMIT || keepPages.has(image.page))
+    .sort((a, b) => a.page - b.page);
 }
 
 async function getActiveTab(): Promise<chrome.tabs.Tab & { id: number }> {

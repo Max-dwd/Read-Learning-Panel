@@ -488,9 +488,16 @@ h3 {
 }
 
 .pdf-page-image-button {
-  background: transparent;
+  align-items: center;
+  aspect-ratio: 8.5 / 11;
+  background: #f8fafc;
   border-radius: 0;
-  display: block;
+  color: #718096;
+  display: grid;
+  font-size: 12px;
+  justify-items: center;
+  line-height: 1.4;
+  overflow: hidden;
   height: auto;
   padding: 0;
   width: 100%;
@@ -499,7 +506,8 @@ h3 {
 .pdf-page-image-button img {
   background: #fff;
   display: block;
-  height: auto;
+  height: 100%;
+  object-fit: contain;
   width: 100%;
 }
 

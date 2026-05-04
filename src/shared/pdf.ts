@@ -113,6 +113,7 @@ export async function renderPdfPage(pdf: PDFDocumentProxy, pageNumber: number): 
   const dataUrl = canvas.toDataURL("image/jpeg", PDF_IMAGE_QUALITY);
   canvas.width = 0;
   canvas.height = 0;
+  cleanupPdfPage(page);
   return {
     page: pageNumber,
     dataUrl
@@ -141,5 +142,12 @@ function getPdfTitle(sourceUrl: string): string {
     return path.split("/").filter(Boolean).pop() || "PDF document";
   } catch {
     return "PDF document";
+  }
+}
+
+function cleanupPdfPage(page: unknown) {
+  const cleanup = (page as { cleanup?: () => void }).cleanup;
+  if (typeof cleanup === "function") {
+    cleanup.call(page);
   }
 }

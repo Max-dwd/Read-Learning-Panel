@@ -28,10 +28,33 @@ type PdfSelectionPayload = {
 };
 
 const PDF_PAGE_SECTION_PREFIX = "pdf-page-";
+const PDF_VIEWER_RENDER_SCALE = 2;
+const PDF_VIEWER_RENDER_AHEAD = 2;
+const PDF_VIEWER_KEEP_AHEAD = 4;
 
 function getSourceFromUrl(): string | null {
   const params = new URLSearchParams(location.search);
   return params.get("src") || null;
+}
+
+function releaseCanvas(canvas: HTMLCanvasElement) {
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+function cleanupPdfPage(page: unknown) {
+  const cleanup = (page as { cleanup?: () => void }).cleanup;
+  if (typeof cleanup === "function") {
+    cleanup.call(page);
+  }
+}
+
+function cleanupPdfDocument(pdf: PDFDocumentProxy | null) {
+  if (!pdf) {
+    return;
+  }
+  void pdf.cleanup().catch(() => undefined);
+  void pdf.destroy().catch(() => undefined);
 }
 
 function App() {
@@ -51,6 +74,8 @@ function App() {
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const renderingRef = useRef(0);
+  const renderedPagesRef = useRef<Set<number>>(new Set());
+  const renderingPagesRef = useRef<Set<number>>(new Set());
   const pageCountRef = useRef(0);
   const highlightedBlocksRef = useRef<DeepPdfBlock[]>([]);
   const highlightedSectionIdRef = useRef("");
@@ -63,6 +88,9 @@ function App() {
     const version = ++renderingRef.current;
     setState("loading");
     setError("");
+    clearRenderedPages();
+    cleanupPdfDocument(pdfRef.current);
+    pdfRef.current = null;
 
     try {
       const loadingTask =
@@ -84,10 +112,12 @@ function App() {
       setPageSizes({});
       setState("ready");
 
-      // Render pages after state update
       requestAnimationFrame(() => {
         if (version !== renderingRef.current) return;
-        void renderAllPages(pdf, version);
+        void preparePageSizes(pdf, version).then(() => {
+          if (version !== renderingRef.current) return;
+          void renderPagesAround(1, version);
+        });
       });
     } catch (err) {
       if (version !== renderingRef.current) return;
@@ -103,6 +133,15 @@ function App() {
       void loadPdf(src);
     }
   }, [loadPdf]);
+
+  useEffect(() => {
+    return () => {
+      renderingRef.current += 1;
+      clearRenderedPages();
+      cleanupPdfDocument(pdfRef.current);
+      pdfRef.current = null;
+    };
+  }, []);
 
   // Keep refs so the stable message handler always uses the latest functions
   const getVisiblePageRef = useRef(getVisiblePage);
@@ -228,6 +267,7 @@ function App() {
         const page = getVisiblePage();
         setCurrentPage(page);
         setPageInputValue(String(page));
+        void renderPagesAround(page, renderingRef.current);
       });
     };
 
@@ -289,41 +329,109 @@ function App() {
     return bestSectionId || highlightedSectionIdRef.current || null;
   }
 
-  async function renderAllPages(pdf: PDFDocumentProxy, version: number) {
-    for (let i = 1; i <= pdf.numPages; i++) {
+  async function preparePageSizes(pdf: PDFDocumentProxy, version: number) {
+    const sizes: Record<number, PageSize> = {};
+    for (let i = 1; i <= pdf.numPages; i += 1) {
       if (version !== renderingRef.current) return;
-
-      const wrapper = pageRefs.current.get(i);
-      if (!wrapper) continue;
-
-      // Skip if already rendered
-      if (wrapper.querySelector("canvas")) continue;
-
       try {
         const page = await pdf.getPage(i);
-        if (version !== renderingRef.current) return;
-
-        const scale = 2;
-        const viewport = page.getViewport({ scale });
         const baseViewport = page.getViewport({ scale: 1 });
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-        if (!ctx) continue;
-
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        await page.render({ canvas, canvasContext: ctx, viewport }).promise;
-        if (version !== renderingRef.current) return;
-
-        wrapper.appendChild(canvas);
-        setPageSizes((sizes) => ({
-          ...sizes,
-          [i]: { width: baseViewport.width, height: baseViewport.height }
-        }));
+        sizes[i] = { width: baseViewport.width, height: baseViewport.height };
+        cleanupPdfPage(page);
       } catch {
-        // Skip failed pages
+        // Keep the page reachable with a default shape if pdf.js cannot read dimensions.
+        sizes[i] = { width: 612, height: 792 };
       }
     }
+    if (version === renderingRef.current) {
+      setPageSizes(sizes);
+    }
+  }
+
+  async function renderPagesAround(anchorPage: number, version: number) {
+    const pdf = pdfRef.current;
+    if (!pdf || version !== renderingRef.current) return;
+
+    releaseDistantPages(anchorPage);
+    const start = Math.max(1, anchorPage - PDF_VIEWER_RENDER_AHEAD);
+    const end = Math.min(pdf.numPages, anchorPage + PDF_VIEWER_RENDER_AHEAD);
+    for (let page = start; page <= end; page += 1) {
+      await renderPageCanvas(pdf, page, version);
+    }
+  }
+
+  async function renderPageCanvas(pdf: PDFDocumentProxy, pageNumber: number, version: number) {
+    if (version !== renderingRef.current || renderedPagesRef.current.has(pageNumber) || renderingPagesRef.current.has(pageNumber)) {
+      return;
+    }
+
+    const wrapper = pageRefs.current.get(pageNumber);
+    if (!wrapper || wrapper.querySelector("canvas")) {
+      renderedPagesRef.current.add(pageNumber);
+      return;
+    }
+
+    renderingPagesRef.current.add(pageNumber);
+    try {
+      const page = await pdf.getPage(pageNumber);
+      if (version !== renderingRef.current) return;
+
+      const viewport = page.getViewport({ scale: PDF_VIEWER_RENDER_SCALE });
+      const baseViewport = page.getViewport({ scale: 1 });
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+      cleanupPdfPage(page);
+      if (version !== renderingRef.current) {
+        releaseCanvas(canvas);
+        return;
+      }
+
+      wrapper.appendChild(canvas);
+      renderedPagesRef.current.add(pageNumber);
+      setPageSizes((sizes) =>
+        sizes[pageNumber]
+          ? sizes
+          : {
+            ...sizes,
+            [pageNumber]: { width: baseViewport.width, height: baseViewport.height }
+          }
+      );
+    } catch {
+      // Skip failed pages.
+    } finally {
+      renderingPagesRef.current.delete(pageNumber);
+    }
+  }
+
+  function releaseDistantPages(anchorPage: number) {
+    for (const page of [...renderedPagesRef.current]) {
+      if (Math.abs(page - anchorPage) <= PDF_VIEWER_KEEP_AHEAD) {
+        continue;
+      }
+      const wrapper = pageRefs.current.get(page);
+      const canvas = wrapper?.querySelector("canvas");
+      if (canvas) {
+        releaseCanvas(canvas);
+        canvas.remove();
+      }
+      renderedPagesRef.current.delete(page);
+    }
+  }
+
+  function clearRenderedPages() {
+    renderedPagesRef.current.clear();
+    renderingPagesRef.current.clear();
+    pageRefs.current.forEach((wrapper) => {
+      wrapper.querySelectorAll("canvas").forEach((canvas) => {
+        releaseCanvas(canvas);
+        canvas.remove();
+      });
+    });
   }
 
   function handleFileSelect() {
@@ -351,6 +459,7 @@ function App() {
   function scrollToPage(page: number, behavior: ScrollBehavior = "smooth") {
     const el = pageRefs.current.get(page);
     el?.scrollIntoView({ behavior, block: "start" });
+    void renderPagesAround(page, renderingRef.current);
   }
 
   function handleBlockClick(block: DeepPdfBlock, targetSectionId: string, event: React.MouseEvent<HTMLButtonElement>) {
@@ -607,6 +716,7 @@ function App() {
             <div
               className="pdf-page-wrapper"
               key={page}
+              style={pageSizes[page] ? { aspectRatio: `${pageSizes[page].width} / ${pageSizes[page].height}` } : undefined}
               onPointerDown={(event) => beginBlockDragSelection(page, event)}
               onPointerMove={(event) => updateBlockDragSelection(page, event)}
               onPointerUp={(event) => finishBlockDragSelection(page, event)}
