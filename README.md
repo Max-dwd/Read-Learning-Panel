@@ -7,6 +7,37 @@ Chrome MV3 extension for article-oriented reading and learning. It extracts H2/H
 - per-section summary
 - each section's role in the article and relationship to the reading goal
 
+## Why Modulized Reading
+
+Long articles and PDFs are hard to learn from when they are treated as one continuous block. Reading Learning Panel turns a document into smaller reading modules, so each section can be understood, questioned, and revisited on its own.
+
+This is useful because it helps you:
+
+- see the document structure before spending attention on details
+- separate the author's main claim, evidence, examples, methods, and caveats
+- understand why a section exists instead of only what it says
+- ask follow-up questions about one section without losing the full-document context
+- review later by returning to the exact module, page, quote, or visual region
+
+The goal is not just summarization. The panel is designed to make reading feel closer to guided self-study: first map the text, then inspect important modules, then ask targeted questions.
+
+## Example
+
+Suppose you open a dense article about AI agents or a textbook PDF chapter.
+
+Instead of reading it as one long page, the extension can split it into modules like:
+
+| Module | What the panel helps with |
+| --- | --- |
+| Introduction | Identifies the main problem and why the topic matters |
+| Background | Explains prerequisites and terms that later sections depend on |
+| Method / Argument | Shows the core mechanism, reasoning chain, or proposed approach |
+| Evidence / Examples | Separates proof, examples, charts, and case studies from the main claim |
+| Limitations | Calls out assumptions, tradeoffs, and where the argument may fail |
+| Conclusion | Connects the section back to the overall reading goal |
+
+For each module, the side panel can show a short summary, the module's role in the whole article, and a focused Q&A area. In PDF mode, page-level cards and visual selection let you ask about a specific page, figure, table, or selected region instead of asking the model to reinterpret the entire file every time.
+
 ## Setup
 
 ```bash
